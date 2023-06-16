@@ -45,6 +45,7 @@ use std::time::Instant;
 
 use crate::adapter::ProviderStatus;
 use crate::chain::BlockFinality;
+use crate::network::RequiredNodeCapabilities;
 use crate::Chain;
 use crate::NodeCapabilities;
 use crate::{
@@ -1127,6 +1128,36 @@ impl EthereumAdapterTrait for EthereumAdapter {
         )
     }
 
+    fn block_number(
+        &self,
+        logger: &Logger,
+    ) -> Box<dyn Future<Item = BlockNumber, Error = Error> + Send> {
+        let web3 = self.web3.clone();
+        let retry_log_message = format!("eth_blockNumber RPC call");
+        Box::new(
+            retry(retry_log_message, logger)
+                .no_limit()
+                .timeout_secs(ENV_VARS.json_rpc_timeout.as_secs())
+                .run(move || {
+                    let web3 = web3.cheap_clone();
+                    async move {
+                        web3.eth()
+                            .block_number()
+                            .await
+                            .map(|block_number| BlockNumber::from(block_number.as_u32() as i32))
+                            .map_err(Error::from)
+                    }
+                })
+                .boxed()
+                .compat()
+                .map_err(move |e| {
+                    e.into_inner().unwrap_or_else(move || {
+                        anyhow!("Ethereum node took too long to return data for block number")
+                    })
+                }),
+        )
+    }
+
     fn block_hash_by_block_number(
         &self,
         logger: &Logger,
@@ -1505,7 +1536,11 @@ pub(crate) async fn get_calls(
             } else {
                 client
                     .rpc()?
-                    .cheapest_with(capabilities)?
+                    .cheapest_with(&RequiredNodeCapabilities {
+                        archive: capabilities.archive,
+                        traces: capabilities.traces,
+                        block: ethereum_block.block.number(),
+                    })?
                     .calls_in_block(
                         &logger,
                         subgraph_metrics.clone(),

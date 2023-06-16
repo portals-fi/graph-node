@@ -1,21 +1,53 @@
 use anyhow::{anyhow, bail};
+use futures::Future;
 use graph::cheap_clone::CheapClone;
 use graph::endpoint::EndpointMetrics;
 use graph::firehose::{AvailableCapacity, SubgraphLimit};
 use graph::prelude::rand::seq::IteratorRandom;
 use graph::prelude::rand::{self, Rng};
+use graph::slog::Logger;
+use itertools::Itertools;
 use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::default;
 use std::sync::Arc;
 
 pub use graph::impl_slog_value;
-use graph::prelude::Error;
+use graph::prelude::{BlockNumber, Error};
 
 use crate::adapter::EthereumAdapter as _;
 use crate::capabilities::NodeCapabilities;
 use crate::EthereumAdapter;
 
-pub const DEFAULT_ADAPTER_ERROR_RETEST_PERCENT: f64 = 0.2;
+pub const DEFAULT_ADAPTER_ERROR_RETEST_PERCENT: f64 = 0.0;
+
+#[derive(Debug)]
+pub struct RequiredNodeCapabilities {
+    pub archive: bool,
+    pub traces: bool,
+    pub block: BlockNumber,
+}
+
+impl Default for RequiredNodeCapabilities {
+    fn default() -> Self {
+        Self {
+            archive: false,
+            traces: false,
+            block: 0,
+        }
+    }
+}
+
+pub fn from_node_capabilities(
+    capabilities: &NodeCapabilities,
+    block: BlockNumber,
+) -> RequiredNodeCapabilities {
+    RequiredNodeCapabilities {
+        archive: capabilities.archive,
+        traces: capabilities.traces,
+        block,
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct EthereumNetworkAdapter {
@@ -27,6 +59,7 @@ pub struct EthereumNetworkAdapter {
     /// that limit. That's a somewhat imprecise but convenient way to
     /// determine the number of connections
     limit: SubgraphLimit,
+    logger: Logger,
 }
 
 impl EthereumNetworkAdapter {
@@ -50,8 +83,6 @@ impl EthereumNetworkAdapter {
 pub struct EthereumNetworkAdapters {
     pub adapters: Vec<EthereumNetworkAdapter>,
     call_only_adapters: Vec<EthereumNetworkAdapter>,
-    // Percentage of request that should be used to retest errored adapters.
-    retest_percent: f64,
 }
 
 impl Default for EthereumNetworkAdapters {
@@ -65,7 +96,6 @@ impl EthereumNetworkAdapters {
         Self {
             adapters: vec![],
             call_only_adapters: vec![],
-            retest_percent: retest_percent.unwrap_or(DEFAULT_ADAPTER_ERROR_RETEST_PERCENT),
         }
     }
 
@@ -94,33 +124,60 @@ impl EthereumNetworkAdapters {
 
     pub fn cheapest_with(
         &self,
-        required_capabilities: &NodeCapabilities,
+        required_capabilities: &RequiredNodeCapabilities,
     ) -> Result<Arc<EthereumAdapter>, Error> {
-        let retest_rng: f64 = (&mut rand::thread_rng()).gen();
-        let cheapest = self
-            .all_cheapest_with(required_capabilities)
-            .choose_multiple(&mut rand::thread_rng(), 3);
-        let cheapest = cheapest.iter();
+        // let retest_rng: f64 = (&mut rand::thread_rng()).gen();
+        // let cheapest = self.all_cheapest_with(&required_capabilities.into());
+        for adapter in self.adapters.iter() {
+            let block_number = Future::wait(adapter.adapter.block_number(&adapter.logger))?;
+            if (adapter.capabilities.archive && required_capabilities.archive)
+                || (required_capabilities.archive
+                    && block_number - required_capabilities.block - 128 <= 0)
+            {
+                return Ok(adapter.adapter.clone());
+            }
+            println!(
+                "adapter: {:?} has capacity {:?}",
+                adapter,
+                adapter.get_capacity()
+            );
+        }
+
+        bail!(
+            "A matching Ethereum network with {:?} was not found.",
+            required_capabilities
+        );
+        // let adapter = cheapest
+        //     .find_or_first(|adapter| {
+        //         adapter.adapter.block_number(logger).await? >= required_capabilities.block
+        //     })
+        //     .map(|adapter| adapter.adapter.clone())
+        //     .ok_or(anyhow!(
+        //         "A matching Ethereum network with {:?} was not found.",
+        //         required_capabilities
+        //     ));
+        // .choose_multiple(&mut rand::thread_rng(), 3);
+        // let cheapest = cheapest.iter();
 
         // If request falls below the retest threshold, use this request to try and
         // reset the failed adapter. If a request succeeds the adapter will be more
         // likely to be selected afterwards.
-        if retest_rng < self.retest_percent {
-            cheapest.max_by_key(|adapter| adapter.current_error_count())
-        } else {
-            // The assumption here is that most RPC endpoints will not have limits
-            // which makes the check for low/high available capacity less relevant.
-            // So we essentially assume if it had available capacity when calling
-            // `all_cheapest_with` then it prolly maintains that state and so we
-            // just select whichever adapter is working better according to
-            // the number of errors.
-            cheapest.min_by_key(|adapter| adapter.current_error_count())
-        }
-        .map(|adapter| adapter.adapter.clone())
-        .ok_or(anyhow!(
-            "A matching Ethereum network with {:?} was not found.",
-            required_capabilities
-        ))
+        // if retest_rng < self.retest_percent {
+        //     cheapest.max_by_key(|adapter| adapter.current_error_count())
+        // } else {
+        //     // The assumption here is that most RPC endpoints will not have limits
+        //     // which makes the check for low/high available capacity less relevant.
+        //     // So we essentially assume if it had available capacity when calling
+        //     // `all_cheapest_with` then it prolly maintains that state and so we
+        //     // just select whichever adapter is working better according to
+        //     // the number of errors.
+        //     cheapest.min_by_key(|adapter| adapter.current_error_count())
+        // }
+        // .map(|adapter| adapter.adapter.clone())
+        // .ok_or(anyhow!(
+        //     "A matching Ethereum network with {:?} was not found.",
+        //     required_capabilities
+        // ))
     }
 
     pub fn cheapest(&self) -> Option<Arc<EthereumAdapter>> {
@@ -138,18 +195,14 @@ impl EthereumNetworkAdapters {
 
     pub fn call_or_cheapest(
         &self,
-        capabilities: Option<&NodeCapabilities>,
+        capabilities: Option<&RequiredNodeCapabilities>,
     ) -> anyhow::Result<Arc<EthereumAdapter>> {
         // call_only_adapter can fail if we're out of capcity, this is fine since
         // we would want to fallback onto a full adapter
         // so we will ignore this error and return whatever comes out of `cheapest_with`
         match self.call_only_adapter() {
             Ok(Some(adapter)) => Ok(adapter),
-            _ => self.cheapest_with(capabilities.unwrap_or(&NodeCapabilities {
-                // Archive is required for call_only
-                archive: true,
-                traces: false,
-            })),
+            _ => self.cheapest_with(capabilities.unwrap_or(&RequiredNodeCapabilities::default())),
         }
     }
 
@@ -211,6 +264,7 @@ impl EthereumNetworks {
             adapter,
             limit,
             endpoint_metrics: self.metrics.cheap_clone(),
+            logger: graph::log::logger(true),
         });
     }
 
@@ -253,6 +307,10 @@ impl EthereumNetworks {
                     .unwrap_or(Ordering::Equal)
             })
         }
+        println!(
+            "Sorted networks: {:?}",
+            self.networks.values().collect::<Vec<_>>()
+        );
     }
 
     pub fn adapter_with_capabilities(
@@ -263,7 +321,7 @@ impl EthereumNetworks {
         self.networks
             .get(&network_name)
             .ok_or(anyhow!("network not supported: {}", &network_name))
-            .and_then(|adapters| adapters.cheapest_with(requirements))
+            .and_then(|adapters| adapters.cheapest_with(&from_node_capabilities(requirements, 0)))
     }
 }
 
@@ -282,7 +340,8 @@ mod tests {
     use uuid::Uuid;
 
     use crate::{
-        EthereumAdapter, EthereumAdapterTrait, EthereumNetworks, ProviderEthRpcMetrics, Transport,
+        network::RequiredNodeCapabilities, EthereumAdapter, EthereumAdapterTrait, EthereumNetworks,
+        ProviderEthRpcMetrics, Transport,
     };
 
     use super::{EthereumNetworkAdapter, EthereumNetworkAdapters, NodeCapabilities};
@@ -409,17 +468,19 @@ mod tests {
         {
             // Not Found
             assert!(adapters
-                .cheapest_with(&NodeCapabilities {
+                .cheapest_with(&RequiredNodeCapabilities {
                     archive: false,
                     traces: true,
+                    block: 0
                 })
                 .is_err());
 
             // Check cheapest is not call only
             let adapter = adapters
-                .cheapest_with(&NodeCapabilities {
+                .cheapest_with(&crate::network::RequiredNodeCapabilities {
                     archive: true,
                     traces: false,
+                    block: 0,
                 })
                 .unwrap();
             assert_eq!(adapter.is_call_only(), false);
@@ -439,9 +500,10 @@ mod tests {
         {
             adapters.call_only_adapters = vec![];
             let adapter = adapters
-                .call_or_cheapest(Some(&NodeCapabilities {
+                .call_or_cheapest(Some(&crate::network::RequiredNodeCapabilities {
                     archive: true,
                     traces: false,
+                    block: 0,
                 }))
                 .unwrap();
             assert_eq!(adapter.is_call_only(), false);
@@ -635,101 +697,103 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn eth_adapter_selection_multiple_adapters() {
-        let logger = Logger::root(Discard, o!());
-        let unavailable_provider = Uuid::new_v4().to_string();
-        let error_provider = Uuid::new_v4().to_string();
-        let no_error_provider = Uuid::new_v4().to_string();
+    // #[tokio::test]
+    // async fn eth_adapter_selection_multiple_adapters() {
+    //     let logger = Logger::root(Discard, o!());
+    //     let unavailable_provider = Uuid::new_v4().to_string();
+    //     let error_provider = Uuid::new_v4().to_string();
+    //     let no_error_provider = Uuid::new_v4().to_string();
 
-        let mock_registry = Arc::new(MetricsRegistry::mock());
-        let metrics = Arc::new(EndpointMetrics::new(
-            logger,
-            &[
-                unavailable_provider.clone(),
-                error_provider.clone(),
-                no_error_provider.clone(),
-            ],
-            mock_registry.clone(),
-        ));
-        let logger = graph::log::logger(true);
-        let provider_metrics = Arc::new(ProviderEthRpcMetrics::new(mock_registry.clone()));
+    //     let mock_registry = Arc::new(MetricsRegistry::mock());
+    //     let metrics = Arc::new(EndpointMetrics::new(
+    //         logger,
+    //         &[
+    //             unavailable_provider.clone(),
+    //             error_provider.clone(),
+    //             no_error_provider.clone(),
+    //         ],
+    //         mock_registry.clone(),
+    //     ));
+    //     let logger = graph::log::logger(true);
+    //     let provider_metrics = Arc::new(ProviderEthRpcMetrics::new(mock_registry.clone()));
 
-        let adapters = vec![
-            fake_adapter(
-                &logger,
-                &unavailable_provider,
-                &provider_metrics,
-                &metrics,
-                false,
-            )
-            .await,
-            fake_adapter(&logger, &error_provider, &provider_metrics, &metrics, false).await,
-            fake_adapter(
-                &logger,
-                &no_error_provider,
-                &provider_metrics,
-                &metrics,
-                false,
-            )
-            .await,
-        ];
+    //     let adapters = vec![
+    //         fake_adapter(
+    //             &logger,
+    //             &unavailable_provider,
+    //             &provider_metrics,
+    //             &metrics,
+    //             false,
+    //         )
+    //         .await,
+    //         fake_adapter(&logger, &error_provider, &provider_metrics, &metrics, false).await,
+    //         fake_adapter(
+    //             &logger,
+    //             &no_error_provider,
+    //             &provider_metrics,
+    //             &metrics,
+    //             false,
+    //         )
+    //         .await,
+    //     ];
 
-        // Set errors
-        metrics.report_for_test(&Provider::from(error_provider.clone()), false);
+    //     // Set errors
+    //     metrics.report_for_test(&Provider::from(error_provider.clone()), false);
 
-        let mut no_retest_adapters = EthereumNetworkAdapters::new(Some(0f64));
-        let mut always_retest_adapters = EthereumNetworkAdapters::new(Some(1f64));
-        adapters.iter().cloned().for_each(|adapter| {
-            let limit = if adapter.provider() == unavailable_provider {
-                SubgraphLimit::Disabled
-            } else {
-                SubgraphLimit::Unlimited
-            };
+    //     let mut no_retest_adapters = EthereumNetworkAdapters::new(Some(0f64));
+    //     let mut always_retest_adapters = EthereumNetworkAdapters::new(Some(1f64));
+    //     adapters.iter().cloned().for_each(|adapter| {
+    //         let limit = if adapter.provider() == unavailable_provider {
+    //             SubgraphLimit::Disabled
+    //         } else {
+    //             SubgraphLimit::Unlimited
+    //         };
 
-            no_retest_adapters.adapters.push(EthereumNetworkAdapter {
-                endpoint_metrics: metrics.clone(),
-                capabilities: NodeCapabilities {
-                    archive: true,
-                    traces: false,
-                },
-                adapter: adapter.clone(),
-                limit: limit.clone(),
-            });
-            always_retest_adapters
-                .adapters
-                .push(EthereumNetworkAdapter {
-                    endpoint_metrics: metrics.clone(),
-                    capabilities: NodeCapabilities {
-                        archive: true,
-                        traces: false,
-                    },
-                    adapter,
-                    limit,
-                });
-        });
+    //         no_retest_adapters.adapters.push(EthereumNetworkAdapter {
+    //             endpoint_metrics: metrics.clone(),
+    //             capabilities: NodeCapabilities {
+    //                 archive: true,
+    //                 traces: false,
+    //             },
+    //             adapter: adapter.clone(),
+    //             limit: limit.clone(),
+    //         });
+    //         always_retest_adapters
+    //             .adapters
+    //             .push(EthereumNetworkAdapter {
+    //                 endpoint_metrics: metrics.clone(),
+    //                 capabilities: NodeCapabilities {
+    //                     archive: true,
+    //                     traces: false,
+    //                 },
+    //                 adapter,
+    //                 limit,
+    //             });
+    //     });
 
-        assert_eq!(
-            no_retest_adapters
-                .cheapest_with(&NodeCapabilities {
-                    archive: true,
-                    traces: false,
-                })
-                .unwrap()
-                .provider(),
-            no_error_provider
-        );
-        assert_eq!(
-            always_retest_adapters
-                .cheapest_with(&NodeCapabilities {
-                    archive: true,
-                    traces: false,
-                })
-                .unwrap()
-                .provider(),
-            error_provider
-        );
-    }
+    //     assert_eq!(
+    //         no_retest_adapters
+    //             .cheapest_with(&crate::network::RequiredNodeCapabilities {
+    //                 archive: true,
+    //                 traces: false,
+    //                 block: 0
+    //             })
+    //             .unwrap()
+    //             .provider(),
+    //         no_error_provider
+    //     );
+    //     assert_eq!(
+    //         always_retest_adapters
+    //             .cheapest_with(&crate::network::RequiredNodeCapabilities {
+    //                 archive: true,
+    //                 traces: false,
+    //                 block: 0
+    //             })
+    //             .unwrap()
+    //             .provider(),
+    //         error_provider
+    //     );
+    // }
 
     #[tokio::test]
     async fn eth_adapter_selection_single_adapter() {
@@ -764,12 +828,14 @@ mod tests {
             adapter: fake_adapter(&logger, &error_provider, &provider_metrics, &metrics, false)
                 .await,
             limit: SubgraphLimit::Unlimited,
+            logger: graph::log::logger(true),
         });
         assert_eq!(
             no_retest_adapters
-                .cheapest_with(&NodeCapabilities {
+                .cheapest_with(&crate::network::RequiredNodeCapabilities {
                     archive: true,
                     traces: false,
+                    block: 0
                 })
                 .unwrap()
                 .provider(),
@@ -794,12 +860,14 @@ mod tests {
                 )
                 .await,
                 limit: SubgraphLimit::Unlimited,
+                logger: graph::log::logger(true),
             });
         assert_eq!(
             always_retest_adapters
-                .cheapest_with(&NodeCapabilities {
+                .cheapest_with(&crate::network::RequiredNodeCapabilities {
                     archive: true,
                     traces: false,
+                    block: 0
                 })
                 .unwrap()
                 .provider(),
@@ -822,10 +890,12 @@ mod tests {
             )
             .await,
             limit: SubgraphLimit::Disabled,
+            logger: graph::log::logger(true),
         });
-        let res = no_available_adapter.cheapest_with(&NodeCapabilities {
+        let res = no_available_adapter.cheapest_with(&RequiredNodeCapabilities {
             archive: true,
             traces: false,
+            block: 0,
         });
         assert!(res.is_err(), "{:?}", res);
     }

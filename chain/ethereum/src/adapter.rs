@@ -876,6 +876,11 @@ pub trait EthereumAdapter: Send + Sync + 'static {
         block_number: BlockNumber,
     ) -> Box<dyn Future<Item = Option<LightEthereumBlock>, Error = Error> + Send>;
 
+    fn block_number(
+        &self,
+        logger: &Logger,
+    ) -> Box<dyn Future<Item = BlockNumber, Error = Error> + Send>;
+
     /// Load full information for the specified `block` (in particular, transaction receipts).
     fn load_full_block(
         &self,

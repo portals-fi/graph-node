@@ -2,12 +2,22 @@ use graph::impl_slog_value;
 use std::cmp::Ordering;
 use std::fmt;
 
+use crate::network::RequiredNodeCapabilities;
 use crate::DataSource;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NodeCapabilities {
     pub archive: bool,
     pub traces: bool,
+}
+
+impl From<&RequiredNodeCapabilities> for NodeCapabilities {
+    fn from(required: &RequiredNodeCapabilities) -> Self {
+        NodeCapabilities {
+            archive: required.archive,
+            traces: required.traces,
+        }
+    }
 }
 
 /// Two [`NodeCapabilities`] can only be compared if one is the subset of the
