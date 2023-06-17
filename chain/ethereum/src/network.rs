@@ -131,11 +131,15 @@ impl EthereumNetworkAdapters {
         for adapter in self.adapters.iter() {
             println!("testing adapter: {:?}", adapter);
             let block_number = Future::wait(adapter.adapter.block_number(&adapter.logger))?;
-            println!("got block_number: {:?}", block_number);
+            println!(
+                "got block_number: {:?} we want {:?}",
+                block_number, required_capabilities
+            );
             if (adapter.capabilities.archive && required_capabilities.archive)
                 || (required_capabilities.archive
                     && block_number - required_capabilities.block - 128 <= 0)
             {
+                println!("returning adapter: {:?}", adapter);
                 return Ok(adapter.adapter.clone());
             }
             println!(
