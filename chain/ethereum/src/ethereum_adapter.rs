@@ -45,6 +45,7 @@ use std::time::Instant;
 
 use crate::adapter::ProviderStatus;
 use crate::chain::BlockFinality;
+use crate::network::EthereumNetworkAdapters;
 use crate::network::RequiredNodeCapabilities;
 use crate::Chain;
 use crate::NodeCapabilities;
@@ -1536,6 +1537,7 @@ pub(crate) async fn get_calls(
             } else {
                 client
                     .rpc()?
+                    .clone()
                     .cheapest_with(&RequiredNodeCapabilities {
                         archive: capabilities.archive,
                         traces: capabilities.traces,

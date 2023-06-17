@@ -9,8 +9,9 @@ use graph::slog::Logger;
 use itertools::Itertools;
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use std::default;
 use std::sync::Arc;
+use std::time::SystemTime;
+use std::{default, time};
 
 pub use graph::impl_slog_value;
 use graph::prelude::{BlockNumber, Error};
@@ -82,6 +83,8 @@ impl EthereumNetworkAdapter {
 #[derive(Debug, Clone)]
 pub struct EthereumNetworkAdapters {
     pub adapters: Vec<EthereumNetworkAdapter>,
+    time: Option<SystemTime>,
+    block_number: BlockNumber,
     call_only_adapters: Vec<EthereumNetworkAdapter>,
 }
 
@@ -96,6 +99,8 @@ impl EthereumNetworkAdapters {
         Self {
             adapters: vec![],
             call_only_adapters: vec![],
+            time: None,
+            block_number: 0,
         }
     }
 
@@ -123,7 +128,7 @@ impl EthereumNetworkAdapters {
     }
 
     pub fn cheapest_with(
-        &self,
+        &mut self,
         required_capabilities: &RequiredNodeCapabilities,
     ) -> Result<Arc<EthereumAdapter>, Error> {
         // let retest_rng: f64 = (&mut rand::thread_rng()).gen();
@@ -133,14 +138,29 @@ impl EthereumNetworkAdapters {
                 return Ok(adapter.adapter.clone());
             }
             println!("testing adapter: {:?}", adapter);
-            let block_number = Future::wait(adapter.adapter.block_number(&adapter.logger))?;
+            let should_refresh = match self.time {
+                Some(last) => match SystemTime::now().duration_since(last) {
+                    Ok(elapsed) => elapsed.as_secs() > 15,
+                    Err(_) => true,
+                },
+                None => true,
+            };
+
+            println!("should_refresh: {:?}", should_refresh);
+
+            if should_refresh {
+                self.block_number = Future::wait(adapter.adapter.block_number(&adapter.logger))?;
+                self.time = Some(SystemTime::now());
+            }
+
+            let in_range = self.block_number - required_capabilities.block - 128 <= 0;
+            println!("in_range: {:?}", in_range);
             println!(
                 "got block_number: {:?} we want {:?}",
-                block_number, required_capabilities
+                self.block_number, required_capabilities
             );
             if (adapter.capabilities.archive && required_capabilities.archive)
-                || (required_capabilities.archive
-                    && block_number - required_capabilities.block - 128 <= 0)
+                || (required_capabilities.archive && in_range)
             {
                 println!("returning adapter: {:?}", adapter);
                 return Ok(adapter.adapter.clone());
@@ -211,7 +231,9 @@ impl EthereumNetworkAdapters {
         // so we will ignore this error and return whatever comes out of `cheapest_with`
         match self.call_only_adapter() {
             Ok(Some(adapter)) => Ok(adapter),
-            _ => self.cheapest_with(capabilities.unwrap_or(&RequiredNodeCapabilities::default())),
+            _ => self
+                .clone()
+                .cheapest_with(capabilities.unwrap_or(&RequiredNodeCapabilities::default())),
         }
     }
 
@@ -330,7 +352,11 @@ impl EthereumNetworks {
         self.networks
             .get(&network_name)
             .ok_or(anyhow!("network not supported: {}", &network_name))
-            .and_then(|adapters| adapters.cheapest_with(&from_node_capabilities(requirements, 0)))
+            .and_then(|adapters| {
+                adapters
+                    .clone()
+                    .cheapest_with(&from_node_capabilities(requirements, 0))
+            })
     }
 }
 
