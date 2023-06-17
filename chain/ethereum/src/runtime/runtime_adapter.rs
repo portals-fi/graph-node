@@ -59,8 +59,6 @@ impl blockchain::RuntimeAdapter<Chain> for RuntimeAdapter {
         let call_cache = self.call_cache.cheap_clone();
         let eth_adapters = self.eth_adapters.cheap_clone();
         let archive = ds.mapping.requires_archive()?;
-        let block_number = ds.start_block;
-        println!("block_number in host_fns: {:?}", block_number);
 
         // Check if the current network version is in the eth_call_no_gas list
         let should_skip_gas = ENV_VARS
@@ -72,16 +70,16 @@ impl blockchain::RuntimeAdapter<Chain> for RuntimeAdapter {
         } else {
             Some(ETH_CALL_GAS)
         };
-
         let ethereum_call = HostFn {
             name: "ethereum.call",
             func: Arc::new(move |ctx, wasm_ptr| {
+                println!("block_number in host_fns: {:?}", ctx.block_ptr.number);
                 // Ethereum calls should prioritise call-only adapters if one is available.
                 let eth_adapter =
                     eth_adapters.call_or_cheapest(Some(&RequiredNodeCapabilities {
                         archive,
                         traces: false,
-                        block: block_number,
+                        block: ctx.block_ptr.number,
                     }))?;
                 ethereum_call(
                     &eth_adapter,
