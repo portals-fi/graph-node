@@ -129,6 +129,9 @@ impl EthereumNetworkAdapters {
         // let retest_rng: f64 = (&mut rand::thread_rng()).gen();
         // let cheapest = self.all_cheapest_with(&required_capabilities.into());
         for adapter in self.adapters.iter() {
+            if required_capabilities.block == -1 {
+                return Ok(adapter.adapter.clone());
+            }
             println!("testing adapter: {:?}", adapter);
             let block_number = Future::wait(adapter.adapter.block_number(&adapter.logger))?;
             println!(

@@ -632,7 +632,7 @@ impl TriggersAdapterTrait<Chain> for TriggersAdapter {
                 let adapter = self
                     .chain_client
                     .rpc()?
-                    .cheapest_with(&from_node_capabilities(&self.capabilities, block_number))?;
+                    .cheapest_with(&from_node_capabilities(&self.capabilities, -1))?;
 
                 let blocks = blocks_with_triggers(
                     adapter,
