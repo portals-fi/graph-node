@@ -60,6 +60,7 @@ impl blockchain::RuntimeAdapter<Chain> for RuntimeAdapter {
         let eth_adapters = self.eth_adapters.cheap_clone();
         let archive = ds.mapping.requires_archive()?;
         let block_number = ds.start_block;
+        println!("block_number in host_fns: {:?}", block_number);
 
         // Check if the current network version is in the eth_call_no_gas list
         let should_skip_gas = ENV_VARS
