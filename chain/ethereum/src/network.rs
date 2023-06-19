@@ -153,7 +153,7 @@ impl EthereumNetworkAdapters {
                 self.time = Some(SystemTime::now());
             }
 
-            let in_range = self.block_number - required_capabilities.block - 128 <= 0;
+            let in_range = self.block_number - required_capabilities.block - 64 <= 0;
             println!("in_range: {:?}", in_range);
             println!(
                 "got block_number: {:?} we want {:?}",
