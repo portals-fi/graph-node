@@ -13,7 +13,7 @@ bytes = "1.0.1"
 cid = "0.10.1"
 diesel = { version = "1.4.8", features = ["postgres", "serde_json", "numeric", "r2d2", "chrono"] }
 diesel_derives = "1.4"
-chrono = "0.4.24"
+chrono = "0.4.25"
 envconfig = "0.10.0"
 Inflector = "0.11.3"
 isatty = "0.1.9"
@@ -45,11 +45,11 @@ slog-envlogger = "2.1.0"
 slog-term = "2.7.0"
 petgraph = "0.6.3"
 tiny-keccak = "1.5.0"
-tokio = { version = "1.28.1", features = ["time", "sync", "macros", "test-util", "rt-multi-thread", "parking_lot"] }
+tokio = { version = "1.28.2", features = ["time", "sync", "macros", "test-util", "rt-multi-thread", "parking_lot"] }
 tokio-stream = { version = "0.1.14", features = ["sync"] }
 tokio-retry = "0.3.0"
 toml = "0.7.4"
-url = "2.3.1"
+url = "2.4.0"
 prometheus = "0.13.3"
 priority-queue = "0.7.0"
 tonic = { workspace = true }

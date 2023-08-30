@@ -300,11 +300,23 @@ where
                 );
 
                 let block: Arc<C::Block> = if self.inputs.chain.is_refetch_block_required() {
+                    let cur = firehose_cursor.clone();
+                    let log = logger.cheap_clone();
+                    let chain = self.inputs.chain.cheap_clone();
                     Arc::new(
-                        self.inputs
-                            .chain
-                            .refetch_firehose_block(&logger, firehose_cursor.clone())
-                            .await?,
+                        retry(
+                            "refetch firehose block after dynamic datasource was added",
+                            &logger,
+                        )
+                        .limit(5)
+                        .no_timeout()
+                        .run(move || {
+                            let cur = cur.clone();
+                            let log = log.cheap_clone();
+                            let chain = chain.cheap_clone();
+                            async move { chain.refetch_firehose_block(&log, cur).await }
+                        })
+                        .await?,
                     )
                 } else {
                     block.cheap_clone()
@@ -478,6 +490,7 @@ where
                 persisted_data_sources,
                 deterministic_errors,
                 processed_data_sources,
+                is_non_fatal_errors_active,
             )
             .await
             .context("Failed to transact block operations")?;

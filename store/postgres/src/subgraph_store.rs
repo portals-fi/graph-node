@@ -22,7 +22,7 @@ use graph::{
     },
     constraint_violation,
     data::query::QueryTarget,
-    data::subgraph::{schema::DeploymentCreate, status},
+    data::subgraph::{schema::DeploymentCreate, status, DeploymentFeatures},
     prelude::StoreEvent,
     prelude::{
         anyhow, futures03::future::join_all, lazy_static, o, web3::types::Address, ApiVersion,
@@ -503,6 +503,7 @@ impl SubgraphStoreInner {
         name: SubgraphName,
         schema: &InputSchema,
         deployment: DeploymentCreate,
+        features: DeploymentFeatures,
         node_id: NodeId,
         network_name: String,
         mode: SubgraphVersionSwitchingMode,
@@ -575,6 +576,9 @@ impl SubgraphStoreInner {
             // Create subgraph, subgraph version, and assignment
             let changes =
                 pconn.create_subgraph_version(name, &site, node_id, mode, exists_and_synced)?;
+
+            pconn.create_subgraph_features(features)?;
+
             let event = StoreEvent::new(changes);
             pconn.send_store_event(&self.sender, &event)?;
             Ok(())
@@ -686,11 +690,21 @@ impl SubgraphStoreInner {
         name: SubgraphName,
         schema: &InputSchema,
         deployment: DeploymentCreate,
+        deployment_features: DeploymentFeatures,
         node_id: NodeId,
         network_name: String,
         mode: SubgraphVersionSwitchingMode,
     ) -> Result<DeploymentLocator, StoreError> {
-        self.create_deployment_internal(name, schema, deployment, node_id, network_name, mode, true)
+        self.create_deployment_internal(
+            name,
+            schema,
+            deployment,
+            deployment_features,
+            node_id,
+            network_name,
+            mode,
+            true,
+        )
     }
 
     pub(crate) fn send_store_event(&self, event: &StoreEvent) -> Result<(), StoreError> {
@@ -1240,6 +1254,7 @@ impl SubgraphStoreTrait for SubgraphStore {
         name: SubgraphName,
         schema: &InputSchema,
         deployment: DeploymentCreate,
+        deployment_features: DeploymentFeatures,
         node_id: NodeId,
         network_name: String,
         mode: SubgraphVersionSwitchingMode,
@@ -1248,6 +1263,7 @@ impl SubgraphStoreTrait for SubgraphStore {
             name,
             schema,
             deployment,
+            deployment_features,
             node_id,
             network_name,
             mode,
@@ -1286,9 +1302,27 @@ impl SubgraphStoreTrait for SubgraphStore {
         self.mirror.assigned_node(site.as_ref())
     }
 
+    /// Returns Option<(node_id,is_paused)> where `node_id` is the node that
+    /// the subgraph is assigned to, and `is_paused` is true if the
+    /// subgraph is paused.
+    /// Returns None if the deployment does not exist.
+    fn assignment_status(
+        &self,
+        deployment: &DeploymentLocator,
+    ) -> Result<Option<(NodeId, bool)>, StoreError> {
+        let site = self.find_site(deployment.id.into())?;
+        self.mirror.assignment_status(site.as_ref())
+    }
+
     fn assignments(&self, node: &NodeId) -> Result<Vec<DeploymentLocator>, StoreError> {
         self.mirror
             .assignments(node)
+            .map(|sites| sites.iter().map(|site| site.into()).collect())
+    }
+
+    fn active_assignments(&self, node: &NodeId) -> Result<Vec<DeploymentLocator>, StoreError> {
+        self.mirror
+            .active_assignments(node)
             .map(|sites| sites.iter().map(|site| site.into()).collect())
     }
 

@@ -6,7 +6,7 @@ use crate::components::server::index_node::VersionInfo;
 use crate::components::transaction_receipt;
 use crate::components::versions::ApiVersion;
 use crate::data::query::Trace;
-use crate::data::subgraph::status;
+use crate::data::subgraph::{status, DeploymentFeatures};
 use crate::data::value::Object;
 use crate::data::{query::QueryTarget, subgraph::schema::*};
 use crate::schema::{ApiSchema, InputSchema};
@@ -70,6 +70,7 @@ pub trait SubgraphStore: Send + Sync + 'static {
         name: SubgraphName,
         schema: &InputSchema,
         deployment: DeploymentCreate,
+        deployment_features: DeploymentFeatures,
         node_id: NodeId,
         network: String,
         mode: SubgraphVersionSwitchingMode,
@@ -95,7 +96,19 @@ pub trait SubgraphStore: Send + Sync + 'static {
 
     fn assigned_node(&self, deployment: &DeploymentLocator) -> Result<Option<NodeId>, StoreError>;
 
+    /// Returns Option<(node_id,is_paused)> where `node_id` is the node that
+    /// the subgraph is assigned to, and `is_paused` is true if the
+    /// subgraph is paused.
+    /// Returns None if the deployment does not exist.
+    fn assignment_status(
+        &self,
+        deployment: &DeploymentLocator,
+    ) -> Result<Option<(NodeId, bool)>, StoreError>;
+
     fn assignments(&self, node: &NodeId) -> Result<Vec<DeploymentLocator>, StoreError>;
+
+    /// Returns assignments that are not paused
+    fn active_assignments(&self, node: &NodeId) -> Result<Vec<DeploymentLocator>, StoreError>;
 
     /// Return `true` if a subgraph `name` exists, regardless of whether the
     /// subgraph has any deployments attached to it
@@ -297,6 +310,7 @@ pub trait WritableStore: ReadStore + DeploymentCursorTracker {
         data_sources: Vec<StoredDynamicDataSource>,
         deterministic_errors: Vec<SubgraphError>,
         offchain_to_remove: Vec<StoredDynamicDataSource>,
+        is_non_fatal_errors_active: bool,
     ) -> Result<(), StoreError>;
 
     /// The deployment `id` finished syncing, mark it as synced in the database

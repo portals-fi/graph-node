@@ -179,6 +179,7 @@ async fn insert_test_data(store: Arc<DieselSubgraphStore>) -> DeploymentLocator 
             name,
             &TEST_SUBGRAPH_SCHEMA,
             deployment,
+            manifest.deployment_features(),
             node_id,
             NETWORK_NAME.to_string(),
             SubgraphVersionSwitchingMode::Instant,
@@ -1270,6 +1271,7 @@ fn entity_changes_are_fired_and_forwarded_to_subscriptions() {
                 name,
                 &schema,
                 deployment,
+                manifest.deployment_features(),
                 node_id,
                 NETWORK_NAME.to_string(),
                 SubgraphVersionSwitchingMode::Instant,
@@ -1536,6 +1538,7 @@ fn handle_large_string_with_index() {
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
+                false,
             )
             .await
             .expect("Failed to insert large text");
@@ -1635,6 +1638,7 @@ fn handle_large_bytea_with_index() {
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
+                false,
             )
             .await
             .expect("Failed to insert large text");
