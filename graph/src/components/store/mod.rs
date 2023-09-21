@@ -20,6 +20,7 @@ use std::borrow::Borrow;
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt::Display;
+use std::str::FromStr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -188,6 +189,8 @@ pub struct DerivedEntityQuery {
     pub entity_field: Word,
     /// The value to compare against
     pub value: Word,
+    /// Boolean indicating if the id is of the type `Bytes`
+    pub id_is_bytes: bool,
 
     /// This is the causality region of the data source that created the entity.
     ///
@@ -195,6 +198,22 @@ pub struct DerivedEntityQuery {
     /// doing the lookup. So if the entity exists but was created on a different causality region,
     /// the lookup will return empty.
     pub causality_region: CausalityRegion,
+}
+
+impl DerivedEntityQuery {
+    /// Checks if a given key and entity match this query.
+    pub fn matches(&self, key: &EntityKey, entity: &Entity) -> bool {
+        key.entity_type == self.entity_type
+            && entity
+                .get(&self.entity_field)
+                .map(|v| match v {
+                    Value::String(s) => s.as_str() == self.value.as_str(),
+                    Value::Bytes(b) => Bytes::from_str(self.value.as_str())
+                        .map_or(false, |bytes_value| &bytes_value == b),
+                    _ => false,
+                })
+                .unwrap_or(false)
+    }
 }
 
 impl EntityKey {
@@ -391,10 +410,23 @@ pub struct EntityRange {
 }
 
 impl EntityRange {
+    /// The default value for `first` that we use when the user doesn't
+    /// specify one
+    pub const FIRST: u32 = 100;
+
     /// Query for the first `n` entities.
     pub fn first(n: u32) -> Self {
         Self {
             first: Some(n),
+            skip: 0,
+        }
+    }
+}
+
+impl std::default::Default for EntityRange {
+    fn default() -> Self {
+        Self {
+            first: Some(Self::FIRST),
             skip: 0,
         }
     }
@@ -572,7 +604,7 @@ impl EntityQuery {
             collection,
             filter: None,
             order: EntityOrder::Default,
-            range: EntityRange::first(100),
+            range: EntityRange::default(),
             logger: None,
             query_id: None,
             trace: false,

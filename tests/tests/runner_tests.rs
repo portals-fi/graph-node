@@ -7,7 +7,9 @@ use std::time::Duration;
 use assert_json_diff::assert_json_eq;
 use graph::blockchain::block_stream::BlockWithTriggers;
 use graph::blockchain::{Block, BlockPtr, Blockchain};
+use graph::data::store::scalar::Bytes;
 use graph::data::subgraph::schema::{SubgraphError, SubgraphHealth};
+use graph::data::value::Word;
 use graph::data_source::CausalityRegion;
 use graph::env::EnvVars;
 use graph::ipfs_client::IpfsClient;
@@ -16,7 +18,10 @@ use graph::prelude::ethabi::ethereum_types::H256;
 use graph::prelude::{
     CheapClone, DeploymentHash, SubgraphAssignmentProvider, SubgraphName, SubgraphStore,
 };
-use graph_tests::fixture::ethereum::{chain, empty_block, genesis, push_test_log};
+use graph_tests::fixture::ethereum::{
+    chain, empty_block, generate_empty_blocks_for_range, genesis, push_test_log,
+    push_test_polling_trigger,
+};
 use graph_tests::fixture::{
     self, stores, test_ptr, test_ptr_reorged, MockAdapterSelector, NoopAdapterSelector, Stores,
 };
@@ -24,7 +29,7 @@ use graph_tests::helpers::run_cmd;
 use slog::{o, Discard, Logger};
 
 struct RunnerTestRecipe {
-    stores: Stores,
+    pub stores: Stores,
     subgraph_name: SubgraphName,
     hash: DeploymentHash,
 }
@@ -146,6 +151,165 @@ async fn typename() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
+async fn derived_loaders() {
+    let RunnerTestRecipe {
+        stores,
+        subgraph_name,
+        hash,
+    } = RunnerTestRecipe::new("derived-loaders").await;
+
+    let blocks = {
+        let block_0 = genesis();
+        let mut block_1 = empty_block(block_0.ptr(), test_ptr(1));
+        push_test_log(&mut block_1, "1_0");
+        push_test_log(&mut block_1, "1_1");
+        let mut block_2 = empty_block(block_1.ptr(), test_ptr(2));
+        push_test_log(&mut block_2, "2_0");
+        vec![block_0, block_1, block_2]
+    };
+
+    let stop_block = blocks.last().unwrap().block.ptr();
+
+    let chain = chain(blocks, &stores, None).await;
+    let ctx = fixture::setup(subgraph_name.clone(), &hash, &stores, &chain, None, None).await;
+
+    ctx.start_and_sync_to(stop_block).await;
+
+    // This test tests that derived loaders work correctly.
+    // The test fixture has 2 entities, `Bar` and `BBar`, which are derived from `Foo` and `BFoo`.
+    // Where `Foo` and `BFoo` are the same entity, but `BFoo` uses Bytes as the ID type.
+    // This test tests multiple edge cases of derived loaders:
+    // - The derived loader is used in the same handler as the entity is created.
+    // - The derived loader is used in the same block as the entity is created.
+    // - The derived loader is used in a later block than the entity is created.
+    // This is to test the cases where the entities are loaded from the store, `EntityCache.updates` and `EntityCache.handler_updates`
+    // It also tests cases where derived entities are updated and deleted when
+    // in same handler, same block and later block as the entity is created/updated.
+    // For more details on the test cases, see `tests/runner-tests/derived-loaders/src/mapping.ts`
+    // Where the test cases are documented in the code.
+
+    let query_res = ctx
+    .query(&format!(
+        r#"{{ testResult(id:"1_0", block: {{ number: 1 }} ){{ id barDerived{{id value value2}} bBarDerived{{id value value2}} }} }}"#,
+    ))
+    .await
+    .unwrap();
+
+    assert_json_eq!(
+        query_res,
+        Some(object! {
+            testResult: object! {
+                id: "1_0",
+                barDerived: vec![
+                    object! {
+                        id: "0_1_0",
+                        value: "0",
+                        value2: "0"
+                    },
+                    object! {
+                        id: "1_1_0",
+                        value: "0",
+                        value2: "0"
+                    },
+                    object! {
+                        id: "2_1_0",
+                        value: "0",
+                        value2: "0"
+                    }
+                ],
+                bBarDerived: vec![
+                    object! {
+                        id: "0x305f315f30",
+                        value: "0",
+                        value2: "0"
+                    },
+                    object! {
+                        id: "0x315f315f30",
+                        value: "0",
+                        value2: "0"
+                    },
+                    object! {
+                        id: "0x325f315f30",
+                        value: "0",
+                        value2: "0"
+                    }
+                ]
+            }
+        })
+    );
+
+    let query_res = ctx
+    .query(&format!(
+        r#"{{ testResult(id:"1_1", block: {{ number: 1 }} ){{ id barDerived{{id value value2}} bBarDerived{{id value value2}} }} }}"#,
+    ))
+    .await
+    .unwrap();
+
+    assert_json_eq!(
+        query_res,
+        Some(object! {
+            testResult: object! {
+                id: "1_1",
+                barDerived: vec![
+                    object! {
+                        id: "0_1_1",
+                        value: "1",
+                        value2: "0"
+                    },
+                    object! {
+                        id: "2_1_1",
+                        value: "0",
+                        value2: "0"
+                    }
+                ],
+                bBarDerived: vec![
+                    object! {
+                        id: "0x305f315f31",
+                        value: "1",
+                        value2: "0"
+                    },
+                    object! {
+                        id: "0x325f315f31",
+                        value: "0",
+                        value2: "0"
+                    }
+                ]
+            }
+        })
+    );
+
+    let query_res = ctx.query(
+    &format!(
+        r#"{{ testResult(id:"2_0" ){{ id barDerived{{id value value2}} bBarDerived{{id value value2}} }} }}"#
+    )
+)
+.await
+.unwrap();
+    assert_json_eq!(
+        query_res,
+        Some(object! {
+            testResult: object! {
+                id: "2_0",
+                barDerived: vec![
+                    object! {
+                        id: "0_2_0",
+                        value: "2",
+                        value2: "0"
+                    }
+                ],
+                bBarDerived: vec![
+                    object! {
+                        id: "0x305f325f30",
+                        value: "2",
+                        value2: "0"
+                    }
+                ]
+            }
+        })
+    );
+}
+
+#[tokio::test]
 async fn file_data_sources() {
     let RunnerTestRecipe {
         stores,
@@ -160,8 +324,13 @@ async fn file_data_sources() {
         let block_3 = empty_block(block_2.ptr(), test_ptr(3));
         let block_4 = empty_block(block_3.ptr(), test_ptr(4));
         let mut block_5 = empty_block(block_4.ptr(), test_ptr(5));
-        push_test_log(&mut block_5, "createFile2");
-        vec![block_0, block_1, block_2, block_3, block_4, block_5]
+        push_test_log(&mut block_5, "spawnOffChainHandlerTest");
+        let block_6 = empty_block(block_5.ptr(), test_ptr(6));
+        let mut block_7 = empty_block(block_6.ptr(), test_ptr(7));
+        push_test_log(&mut block_7, "createFile2");
+        vec![
+            block_0, block_1, block_2, block_3, block_4, block_5, block_6, block_7,
+        ]
     };
 
     // This test assumes the file data sources will be processed in the same block in which they are
@@ -211,7 +380,7 @@ async fn file_data_sources() {
 
     assert_json_eq!(
         query_res,
-        Some(object! { ipfsFile1: object!{ id: id , content: content } })
+        Some(object! { ipfsFile1: object!{ id: id , content: content.clone() } })
     );
 
     ctx.start_and_sync_to(test_ptr(4)).await;
@@ -231,10 +400,35 @@ async fn file_data_sources() {
         causality_region = causality_region.next();
     }
 
-    let stop_block = test_ptr(5);
+    ctx.start_and_sync_to(test_ptr(5)).await;
+    let writable = ctx
+        .store
+        .clone()
+        .writable(ctx.logger.clone(), ctx.deployment.id, Arc::new(Vec::new()))
+        .await
+        .unwrap();
+    let data_sources = writable.load_dynamic_data_sources(vec![]).await.unwrap();
+    assert!(data_sources.len() == 4);
+
+    ctx.start_and_sync_to(test_ptr(6)).await;
+    let query_res = ctx
+        .query(&format!(
+            r#"{{ spawnTestEntity(id: "{id}") {{ id, content, context }} }}"#,
+        ))
+        .await
+        .unwrap();
+
+    assert_json_eq!(
+        query_res,
+        Some(
+            object! { spawnTestEntity: object!{ id: id , content: content.clone(), context: "fromSpawnTestHandler" } }
+        )
+    );
+
+    let stop_block = test_ptr(7);
     let err = ctx.start_and_sync_to_error(stop_block.clone()).await;
     let message = "entity type `IpfsFile1` is not on the 'entities' list for data source `File2`. \
-                   Hint: Add `IpfsFile1` to the 'entities' list, which currently is: `IpfsFile`.\twasm backtrace:\t    0: 0x3649 - <unknown>!src/mapping/handleFile1\t in handler `handleFile1` at block #5 ()".to_string();
+                   Hint: Add `IpfsFile1` to the 'entities' list, which currently is: `IpfsFile`.\twasm backtrace:\t    0: 0x3737 - <unknown>!src/mapping/handleFile1\t in handler `handleFile1` at block #7 ()".to_string();
     let expected_err = SubgraphError {
         subgraph_id: ctx.deployment.hash.clone(),
         message,
@@ -246,20 +440,20 @@ async fn file_data_sources() {
 
     // Unfail the subgraph to test a conflict between an onchain and offchain entity
     {
-        ctx.rewind(test_ptr(4));
+        ctx.rewind(test_ptr(6));
 
-        // Replace block number 5 with one that contains a different event
+        // Replace block number 7 with one that contains a different event
         let mut blocks = blocks.clone();
         blocks.pop();
-        let block_5_1_ptr = test_ptr_reorged(5, 1);
-        let mut block_5_1 = empty_block(test_ptr(4), block_5_1_ptr.clone());
-        push_test_log(&mut block_5_1, "saveConflictingEntity");
-        blocks.push(block_5_1);
+        let block_7_1_ptr = test_ptr_reorged(7, 1);
+        let mut block_7_1 = empty_block(test_ptr(6), block_7_1_ptr.clone());
+        push_test_log(&mut block_7_1, "saveConflictingEntity");
+        blocks.push(block_7_1);
 
         chain.set_block_stream(blocks);
 
         // Errors in the store pipeline can be observed by using the runner directly.
-        let runner = ctx.runner(block_5_1_ptr.clone()).await;
+        let runner = ctx.runner(block_7_1_ptr.clone()).await;
         let err = runner
             .run()
             .await
@@ -274,19 +468,19 @@ async fn file_data_sources() {
 
     // Unfail the subgraph to test a conflict between an onchain and offchain entity
     {
-        // Replace block number 5 with one that contains a different event
+        // Replace block number 7 with one that contains a different event
         let mut blocks = blocks.clone();
         blocks.pop();
-        let block_5_2_ptr = test_ptr_reorged(5, 2);
-        let mut block_5_2 = empty_block(test_ptr(4), block_5_2_ptr.clone());
-        push_test_log(&mut block_5_2, "createFile1");
-        blocks.push(block_5_2);
+        let block_7_2_ptr = test_ptr_reorged(7, 2);
+        let mut block_7_2 = empty_block(test_ptr(6), block_7_2_ptr.clone());
+        push_test_log(&mut block_7_2, "createFile1");
+        blocks.push(block_7_2);
 
         chain.set_block_stream(blocks);
 
         // Errors in the store pipeline can be observed by using the runner directly.
         let err = ctx
-            .runner(block_5_2_ptr.clone())
+            .runner(block_7_2_ptr.clone())
             .await
             .run()
             .await
@@ -298,6 +492,161 @@ async fn file_data_sources() {
                 .to_string();
         assert_eq!(err.to_string(), message);
     }
+
+    {
+        ctx.rewind(test_ptr(6));
+        // Replace block number 7 with one that contains a different event
+        let mut blocks = blocks.clone();
+        blocks.pop();
+        let block_7_3_ptr = test_ptr_reorged(7, 1);
+        let mut block_7_3 = empty_block(test_ptr(6), block_7_3_ptr.clone());
+        push_test_log(&mut block_7_3, "spawnOnChainHandlerTest");
+        blocks.push(block_7_3);
+
+        chain.set_block_stream(blocks);
+
+        // Errors in the store pipeline can be observed by using the runner directly.
+        let err = ctx.start_and_sync_to_error(block_7_3_ptr).await;
+        let message =
+            "Attempted to create on-chain data source in offchain data source handler. This is not yet supported. at block #7 (0000000100000000000000000000000000000000000000000000000000000007)"
+                .to_string();
+        assert_eq!(err.to_string(), message);
+    }
+}
+
+#[tokio::test]
+async fn block_handlers() {
+    let RunnerTestRecipe {
+        stores,
+        subgraph_name,
+        hash,
+    } = RunnerTestRecipe::new("block-handlers").await;
+
+    let blocks = {
+        let block_0 = genesis();
+        let block_1_to_3 = generate_empty_blocks_for_range(block_0.ptr(), 1, 3);
+        let block_4 = {
+            let mut block = empty_block(block_1_to_3.last().unwrap().ptr(), test_ptr(4));
+            push_test_polling_trigger(&mut block);
+            push_test_log(&mut block, "create_template");
+            block
+        };
+        let block_5 = {
+            let mut block = empty_block(block_4.ptr(), test_ptr(5));
+            push_test_polling_trigger(&mut block);
+            block
+        };
+        let block_6 = {
+            let mut block = empty_block(block_5.ptr(), test_ptr(6));
+            push_test_polling_trigger(&mut block);
+            block
+        };
+        let block_7 = {
+            let mut block = empty_block(block_6.ptr(), test_ptr(7));
+            push_test_polling_trigger(&mut block);
+            block
+        };
+        let block_8 = {
+            let mut block = empty_block(block_7.ptr(), test_ptr(8));
+            push_test_polling_trigger(&mut block);
+            block
+        };
+        let block_9 = {
+            let mut block = empty_block(block_8.ptr(), test_ptr(9));
+            push_test_polling_trigger(&mut block);
+            block
+        };
+        let block_10 = {
+            let mut block = empty_block(block_9.ptr(), test_ptr(10));
+            push_test_polling_trigger(&mut block);
+            block
+        };
+
+        // return the blocks
+        vec![block_0]
+            .into_iter()
+            .chain(block_1_to_3)
+            .chain(vec![
+                block_4, block_5, block_6, block_7, block_8, block_9, block_10,
+            ])
+            .collect()
+    };
+
+    let chain = chain(blocks, &stores, None).await;
+
+    let mut env_vars = EnvVars::default();
+    env_vars.experimental_static_filters = true;
+
+    let ctx = fixture::setup(
+        subgraph_name.clone(),
+        &hash,
+        &stores,
+        &chain,
+        None,
+        Some(env_vars),
+    )
+    .await;
+
+    ctx.start_and_sync_to(test_ptr(10)).await;
+
+    let query = format!(
+        r#"{{ blockFromPollingHandlers(first: {first}) {{ id, hash }} }}"#,
+        first = 3
+    );
+    let query_res = ctx.query(&query).await.unwrap();
+
+    assert_eq!(
+        query_res,
+        Some(object! {
+            blockFromPollingHandlers: vec![
+                object! {
+                    id: test_ptr(0).number.to_string(),
+                    hash:format!("0x{}",test_ptr(0).hash_hex()) ,
+                },
+                object! {
+                id: test_ptr(4).number.to_string(),
+                hash:format!("0x{}",test_ptr(4).hash_hex()) ,
+                },
+                object! {
+                    id: test_ptr(8).number.to_string(),
+                    hash:format!("0x{}",test_ptr(8).hash_hex()) ,
+                },
+            ]
+        })
+    );
+
+    let query = format!(
+        r#"{{ blockFromOtherPollingHandlers(first: {first}, orderBy: number) {{ id, hash }} }}"#,
+        first = 4
+    );
+    let query_res = ctx.query(&query).await.unwrap();
+
+    assert_eq!(
+        query_res,
+        Some(object! {
+            blockFromOtherPollingHandlers: vec![
+                // TODO: The block in which the handler was created is not included
+                // in the result. This is because for runner tests we mock the triggers_adapter
+                // A mock triggers adapter which can be used here is to be implemented
+                // object! {
+                //     id: test_ptr(4).number.to_string(),
+                //     hash:format!("0x{}",test_ptr(10).hash_hex()) ,
+                // },
+                object!{
+                    id: test_ptr(6).number.to_string(),
+                    hash:format!("0x{}",test_ptr(6).hash_hex()) ,
+                },
+                object!{
+                    id: test_ptr(8).number.to_string(),
+                    hash:format!("0x{}",test_ptr(8).hash_hex()) ,
+                },
+                object!{
+                    id: test_ptr(10).number.to_string(),
+                    hash:format!("0x{}",test_ptr(10).hash_hex()) ,
+                },
+            ]
+        })
+    );
 }
 
 #[tokio::test]
@@ -348,6 +697,37 @@ async fn template_static_filters_false_positives() {
             253, 249, 50, 171, 127, 117, 77, 13, 79, 132, 88, 246, 223, 214, 225, 39, 112, 19, 73,
             97, 193, 132, 103, 19, 191, 5, 28, 14, 232, 137, 76, 9
         ],
+    );
+}
+
+#[tokio::test]
+async fn parse_data_source_context() {
+    let RunnerTestRecipe {
+        stores,
+        subgraph_name,
+        hash,
+    } = RunnerTestRecipe::new("data-sources").await;
+
+    let blocks = {
+        let block_0 = genesis();
+        let block_1 = empty_block(block_0.ptr(), test_ptr(1));
+        let block_2 = empty_block(block_1.ptr(), test_ptr(2));
+        vec![block_0, block_1, block_2]
+    };
+    let stop_block = blocks.last().unwrap().block.ptr();
+    let chain = chain(blocks, &stores, None).await;
+
+    let ctx = fixture::setup(subgraph_name.clone(), &hash, &stores, &chain, None, None).await;
+    ctx.start_and_sync_to(stop_block).await;
+
+    let query_res = ctx
+        .query(r#"{ data(id: "0") { id, foo, bar } }"#)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        query_res,
+        Some(object! { data: object!{ id: "0", foo: "test", bar: 1 } })
     );
 }
 
@@ -453,6 +833,127 @@ async fn fatal_error() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn arweave_file_data_sources() {
+    let RunnerTestRecipe {
+        stores,
+        subgraph_name,
+        hash,
+    } = RunnerTestRecipe::new("arweave-file-data-sources").await;
+
+    let blocks = {
+        let block_0 = genesis();
+        let block_1 = empty_block(block_0.ptr(), test_ptr(1));
+        let block_2 = empty_block(block_1.ptr(), test_ptr(2));
+        vec![block_0, block_1, block_2]
+    };
+
+    // HASH used in the mappings.
+    let id = "8APeQ5lW0-csTcBaGdPBDLAL2ci2AT9pTn2tppGPU_8";
+
+    // This test assumes the file data sources will be processed in the same block in which they are
+    // created. But the test might fail due to a race condition if for some reason it takes longer
+    // than expected to fetch the file from arweave. The sleep here will conveniently happen after the
+    // data source is added to the offchain monitor but before the monitor is checked, in an an
+    // attempt to ensure the monitor has enough time to fetch the file.
+    let adapter_selector = NoopAdapterSelector {
+        x: PhantomData,
+        triggers_in_block_sleep: Duration::from_millis(1500),
+    };
+    let chain = chain(blocks.clone(), &stores, Some(Arc::new(adapter_selector))).await;
+    let ctx = fixture::setup(subgraph_name.clone(), &hash, &stores, &chain, None, None).await;
+    ctx.start_and_sync_to(test_ptr(2)).await;
+
+    let store = ctx.store.cheap_clone();
+    let writable = store
+        .writable(ctx.logger.clone(), ctx.deployment.id, Arc::new(Vec::new()))
+        .await
+        .unwrap();
+    let datasources = writable.load_dynamic_data_sources(vec![]).await.unwrap();
+    assert_eq!(datasources.len(), 1);
+    let ds = datasources.first().unwrap();
+    assert_ne!(ds.causality_region, CausalityRegion::ONCHAIN);
+    assert_eq!(ds.done_at.is_some(), true);
+    assert_eq!(
+        ds.param.as_ref().unwrap(),
+        &Bytes::from(Word::from(id).as_bytes())
+    );
+
+    let content_bytes = ctx.arweave_resolver.get(&Word::from(id)).await.unwrap();
+    let content = String::from_utf8(content_bytes.into()).unwrap();
+    let query_res = ctx
+        .query(&format!(r#"{{ file(id: "{id}") {{ id, content }} }}"#,))
+        .await
+        .unwrap();
+
+    assert_json_eq!(
+        query_res,
+        Some(object! { file: object!{ id: id, content: content.clone() } })
+    );
+}
+
+#[tokio::test]
+async fn poi_for_deterministically_failed_sg() -> anyhow::Result<()> {
+    let RunnerTestRecipe {
+        stores,
+        subgraph_name,
+        hash,
+    } = RunnerTestRecipe::new("fatal-error").await;
+
+    let blocks = {
+        let block_0 = genesis();
+        let block_1 = empty_block(block_0.ptr(), test_ptr(1));
+        let block_2 = empty_block(block_1.ptr(), test_ptr(2));
+        let block_3 = empty_block(block_2.ptr(), test_ptr(3));
+        // let block_4 = empty_block(block_3.ptr(), test_ptr(4));
+        vec![block_0, block_1, block_2, block_3]
+    };
+
+    let stop_block = blocks.last().unwrap().block.ptr();
+
+    let chain = chain(blocks.clone(), &stores, None).await;
+    let ctx = fixture::setup(subgraph_name.clone(), &hash, &stores, &chain, None, None).await;
+
+    ctx.start_and_sync_to_error(stop_block).await;
+
+    // Go through the indexing status API to also test it.
+    let status = ctx.indexing_status().await;
+    assert!(status.health == SubgraphHealth::Failed);
+    assert!(status.entity_count == 1.into()); // Only PoI
+    let err = status.fatal_error.unwrap();
+    assert!(err.block.number == 3.into());
+    assert!(err.deterministic);
+
+    let sg_store = stores.network_store.subgraph_store();
+
+    let poi2 = sg_store
+        .get_proof_of_indexing(&hash, &None, test_ptr(2))
+        .await
+        .unwrap();
+
+    // All POIs past this point should be the same
+    let poi3 = sg_store
+        .get_proof_of_indexing(&hash, &None, test_ptr(3))
+        .await
+        .unwrap();
+    assert!(poi2 != poi3);
+
+    let poi4 = sg_store
+        .get_proof_of_indexing(&hash, &None, test_ptr(4))
+        .await
+        .unwrap();
+    assert_eq!(poi3, poi4);
+    assert!(poi2 != poi4);
+
+    let poi100 = sg_store
+        .get_proof_of_indexing(&hash, &None, test_ptr(100))
+        .await
+        .unwrap();
+    assert_eq!(poi4, poi100);
+    assert!(poi2 != poi100);
+
+    Ok(())
+}
 async fn build_subgraph(dir: &str) -> DeploymentHash {
     build_subgraph_with_yarn_cmd(dir, "deploy:test").await
 }

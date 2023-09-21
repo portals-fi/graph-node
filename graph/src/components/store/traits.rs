@@ -61,6 +61,11 @@ pub trait SubgraphStore: Send + Sync + 'static {
     /// node, as the store will still accept queries.
     fn is_deployed(&self, id: &DeploymentHash) -> Result<bool, StoreError>;
 
+    async fn subgraph_features(
+        &self,
+        deployment: &DeploymentHash,
+    ) -> Result<Option<DeploymentFeatures>, StoreError>;
+
     /// Create a new deployment for the subgraph `name`. If the deployment
     /// already exists (as identified by the `schema.id`), reuse that, otherwise
     /// create a new deployment, and point the current or pending version of
@@ -70,11 +75,13 @@ pub trait SubgraphStore: Send + Sync + 'static {
         name: SubgraphName,
         schema: &InputSchema,
         deployment: DeploymentCreate,
-        deployment_features: DeploymentFeatures,
         node_id: NodeId,
         network: String,
         mode: SubgraphVersionSwitchingMode,
     ) -> Result<DeploymentLocator, StoreError>;
+
+    /// Create a subgraph_feature record in the database
+    fn create_subgraph_features(&self, features: DeploymentFeatures) -> Result<(), StoreError>;
 
     /// Create a new subgraph with the given name. If one already exists, use
     /// the existing one. Return the `id` of the newly created or existing
@@ -126,6 +133,9 @@ pub trait SubgraphStore: Send + Sync + 'static {
 
     /// Return the GraphQL schema supplied by the user
     fn input_schema(&self, subgraph_id: &DeploymentHash) -> Result<Arc<InputSchema>, StoreError>;
+
+    /// Return a bool represeting whether there is a pending graft for the subgraph
+    fn graft_pending(&self, id: &DeploymentHash) -> Result<bool, StoreError>;
 
     /// Return the GraphQL schema that was derived from the user's schema by
     /// adding a root query type etc. to it
@@ -239,6 +249,8 @@ impl<T: ?Sized + ReadStore> ReadStore for Arc<T> {
 }
 
 pub trait DeploymentCursorTracker: Sync + Send + 'static {
+    fn input_schema(&self) -> Arc<InputSchema>;
+
     /// Get a pointer to the most recently processed block in the subgraph.
     fn block_ptr(&self) -> Option<BlockPtr>;
 
@@ -255,6 +267,10 @@ impl<T: ?Sized + DeploymentCursorTracker> DeploymentCursorTracker for Arc<T> {
 
     fn firehose_cursor(&self) -> FirehoseCursor {
         (**self).firehose_cursor()
+    }
+
+    fn input_schema(&self) -> Arc<InputSchema> {
+        (**self).input_schema()
     }
 }
 
@@ -547,6 +563,13 @@ pub trait QueryStore: Send + Sync {
 
     /// A permit should be acquired before starting query execution.
     async fn query_permit(&self) -> Result<tokio::sync::OwnedSemaphorePermit, StoreError>;
+
+    /// Report the name of the shard in which the subgraph is stored. This
+    /// should only be used for reporting and monitoring
+    fn shard(&self) -> &str;
+
+    /// Return the deployment id that is queried by this `QueryStore`
+    fn deployment_id(&self) -> DeploymentId;
 }
 
 /// A view of the store that can provide information about the indexing status
@@ -596,5 +619,15 @@ pub trait StatusStore: Send + Sync + 'static {
         &self,
         subgraph_id: &DeploymentHash,
         block_number: BlockNumber,
+        fetch_block_ptr: &dyn BlockPtrForNumber,
     ) -> Result<Option<(PartialBlockPtr, [u8; 32])>, StoreError>;
+}
+
+#[async_trait]
+pub trait BlockPtrForNumber: Send + Sync {
+    async fn block_ptr_for_number(
+        &self,
+        network: String,
+        number: BlockNumber,
+    ) -> Result<Option<BlockPtr>, Error>;
 }

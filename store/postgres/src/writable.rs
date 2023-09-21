@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 use std::ops::Deref;
+use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, RwLock, TryLockError as RwLockError};
 use std::time::{Duration, Instant};
@@ -10,6 +11,8 @@ use graph::components::store::{
     Batch, DeploymentCursorTracker, DerivedEntityQuery, EntityKey, ReadStore,
 };
 use graph::constraint_violation;
+use graph::data::store::scalar::Bytes;
+use graph::data::store::Value;
 use graph::data::subgraph::schema;
 use graph::data_source::CausalityRegion;
 use graph::prelude::{
@@ -729,6 +732,16 @@ pub(crate) mod test_support {
             queue.push(()).await
         }
     }
+
+    pub async fn flush_steps(deployment: graph::components::store::DeploymentId) {
+        let queue = {
+            let mut map = STEPS.lock().unwrap();
+            map.remove(&deployment)
+        };
+        if let Some(queue) = queue {
+            queue.push(()).await;
+        }
+    }
 }
 
 impl std::fmt::Debug for Queue {
@@ -991,6 +1004,10 @@ impl Queue {
     /// Wait for the background writer to finish processing queued entries
     async fn flush(&self) -> Result<(), StoreError> {
         self.check_err()?;
+
+        #[cfg(debug_assertions)]
+        test_support::flush_steps(self.store.site.id.into()).await;
+
         // Turn off batching so the queue doesn't wait for a batch to become
         // full, but restore the old behavior once the queue is empty.
         let batching = self.batch_writes.load(Ordering::SeqCst);
@@ -1062,8 +1079,14 @@ impl Queue {
             &self.queue,
             BTreeMap::new(),
             |mut map: BTreeMap<EntityKey, Option<Entity>>, batch, at| {
-                // See if we have changes for any of the keys.
+                // See if we have changes for any of the keys. Since we are
+                // going from newest to oldest block, do not clobber already
+                // existing entries in map as that would make us use an
+                // older value.
                 for key in &keys {
+                    if map.contains_key(key) {
+                        continue;
+                    }
                     match batch.last_op(key, at) {
                         Some(EntityOp::Write { key: _, entity }) => {
                             map.insert(key.clone(), Some(entity.clone()));
@@ -1100,7 +1123,12 @@ impl Queue {
         fn is_related(derived_query: &DerivedEntityQuery, entity: &Entity) -> bool {
             entity
                 .get(&derived_query.entity_field)
-                .map(|related_id| related_id.as_str() == Some(&derived_query.value))
+                .map(|v| match v {
+                    Value::String(s) => s.as_str() == derived_query.value.as_str(),
+                    Value::Bytes(b) => Bytes::from_str(derived_query.value.as_str())
+                        .map_or(false, |bytes_value| &bytes_value == b),
+                    _ => false,
+                })
                 .unwrap_or(false)
         }
 
@@ -1125,7 +1153,14 @@ impl Queue {
             &self.queue,
             BTreeMap::new(),
             |mut map: BTreeMap<EntityKey, Option<Entity>>, batch, at| {
-                map.extend(effective_ops(batch, derived_query, at));
+                // Since we are going newest to oldest, do not clobber
+                // already existing entries in map as that would make us
+                // produce stale values
+                for (k, v) in effective_ops(batch, derived_query, at) {
+                    if !map.contains_key(&k) {
+                        map.insert(k, v);
+                    }
+                }
                 map
             },
         );
@@ -1421,6 +1456,10 @@ impl DeploymentCursorTracker for WritableStore {
 
     fn firehose_cursor(&self) -> FirehoseCursor {
         self.block_cursor.lock().unwrap().clone()
+    }
+
+    fn input_schema(&self) -> Arc<InputSchema> {
+        self.store.input_schema()
     }
 }
 

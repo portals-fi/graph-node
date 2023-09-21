@@ -329,7 +329,6 @@ async fn insert_test_entities(
             name,
             &manifest.schema,
             deployment,
-            manifest.deployment_features(),
             node_id,
             NETWORK_NAME.to_string(),
             SubgraphVersionSwitchingMode::Instant,
@@ -626,6 +625,7 @@ async fn run_subscription(
         max_first: std::u32::MAX,
         max_skip: std::u32::MAX,
         graphql_metrics: graphql_metrics(),
+        load_manager: LOAD_MANAGER.clone(),
     };
     let schema = STORE
         .subgraph_store()
@@ -1053,7 +1053,7 @@ fn can_query_with_sorting_by_child_interface() {
 }
 
 #[test]
-fn can_not_query_interface_with_sorting_by_child_entity() {
+fn can_query_interface_with_sorting_by_child_entity() {
     const QUERY: &str = "
     query {
         desc: medias(first: 100, orderBy: author__name, orderDirection: desc) {
@@ -1071,13 +1071,32 @@ fn can_not_query_interface_with_sorting_by_child_entity() {
     }";
 
     run_query(QUERY, |result, _| {
-        // Sorting an interface by child-level entity (derived) is not supported
-        assert!(result.has_errors());
+        let author1 = object! { name: "Baden" };
+        let author2 = object! { name: "Goodwill" };
+        let desc_medias = vec![
+            object! { title: "Folk Tune Music Video",       author: author2.clone() },
+            object! { title: "Rock Tune Music Video",       author: author2.clone() },
+            object! { title: "Cheesy Tune Music Video",     author: author2.clone() },
+            object! { title: "Pop Tune Single Cover",       author: author1.clone() },
+            object! { title: "Rock Tune Single Cover",      author: author1.clone() },
+            object! { title: "Cheesy Tune Single Cover",    author: author1.clone() },
+        ];
+        let mut asc_medias = desc_medias.clone();
+
+        asc_medias.reverse();
+
+        let exp = object! {
+            desc: desc_medias,
+            asc: asc_medias,
+        };
+
+        let data = extract_data!(result).unwrap();
+        assert_eq!(data, exp);
     });
 }
 
 #[test]
-fn can_not_query_interface_with_sorting_by_derived_child_entity() {
+fn can_query_interface_with_sorting_by_derived_child_entity() {
     const QUERY: &str = "
     query {
         desc: medias(first: 100, orderBy: song__title, orderDirection: desc) {
@@ -1095,8 +1114,27 @@ fn can_not_query_interface_with_sorting_by_derived_child_entity() {
     }";
 
     run_query(QUERY, |result, _| {
-        // Sorting an interface by child-level entity is not supported
-        assert!(result.has_errors());
+        let exp = object! {
+            desc: vec![
+                object! { title: "Rock Tune Music Video", song : object! { title: "Rock Tune" } },
+                object! { title: "Rock Tune Single Cover", song : object! { title: "Rock Tune" } },
+                object! { title: "Pop Tune Single Cover", song : object! { title: "Pop Tune" } },
+                object! { title: "Folk Tune Music Video", song : object! { title: "Folk Tune" } },
+                object! { title: "Cheesy Tune Music Video", song : object! { title: "Cheesy Tune" } },
+                object! { title: "Cheesy Tune Single Cover", song : object! { title: "Cheesy Tune" } },
+            ],
+            asc: vec![
+                object! { title: "Cheesy Tune Single Cover", song : object! { title: "Cheesy Tune" } },
+                object! { title: "Cheesy Tune Music Video", song : object! { title: "Cheesy Tune" } },
+                object! { title: "Folk Tune Music Video", song : object! { title: "Folk Tune" } },
+                object! { title: "Pop Tune Single Cover", song : object! { title: "Pop Tune" } },
+                object! { title: "Rock Tune Single Cover", song : object! { title: "Rock Tune" } },
+                object! { title: "Rock Tune Music Video", song : object! { title: "Rock Tune" } },
+            ]
+        };
+
+        let data = extract_data!(result).unwrap();
+        assert_eq!(data, exp);
     });
 }
 

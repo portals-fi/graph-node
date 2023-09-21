@@ -2,15 +2,62 @@
 
 ## Unreleased
 
-- `graphman rewind` has changed, block-number and block-hash are now flags instead of arguments
-- `graphman rewind` now has an extra flag `--start-block` which will rewind to the startBlock set in manifest or to the genesis block if no startBlock is set
-- `graphman` now has two new commands `pause` and `resume` that can be used to pause and resume a deployment
+## v0.32.0
+
+### What's New
+
+- **Derived fields getter**: Derived fields can now be accessed from within the mapping code during indexing. ([#4434](https://github.com/graphprotocol/graph-node/pull/4434))
+- **Sorting interfaces by child entity**: Interfaces can now be sorted by non-derived child entities. ([#4058](https://github.com/graphprotocol/graph-node/pull/4058))
+- **File data sources can now be spawned from handlers of other file data sources**: This enables the use of file data sources for scenarios where a file data source needs to be spawned from another one. One practical application of this feature is in handling NFT metadata. In such cases, the metadata itself is stored as a file on IPFS and contains embedded IPFS CID for the actual file for the NFT. ([#4713](https://github.com/graphprotocol/graph-node/pull/4713))
+- Allow redeployment of grafted subgraphs even when graft_base is not available: This will allow renaming of already synced grafted subgraphs even when the graft base is not available, which previously failed due to `graft-base` validation errors. ([#4695](https://github.com/graphprotocol/graph-node/pull/4695))
+- `history_blocks` is now available in the index-node API. ([#4662](https://github.com/graphprotocol/graph-node/pull/4662))
+- Added a new `subgraph features` table in `primary` to easily track information like `apiVersion`, `specVersion`, `features`, and data source kinds used by subgraphs. ([#4679](https://github.com/graphprotocol/graph-node/pull/4679))
+- `subgraphFeatures` endpoint now includes data from `subgraph_features` table.
+- `ens_name_by_hash` is now undeprecated: This reintroduces support for fetching ENS names by their hash, dependent on the availability of the underlying [Rainbow Table](https://github.com/graphprotocol/ens-rainbow) ([#4751](https://github.com/graphprotocol/graph-node/pull/4751)).
+- Deterministically failed subgraphs now return valid POIs for subsequent blocks after the block at which it failed. ([#4774](https://github.com/graphprotocol/graph-node/pull/4774))
+- `eth-call` logs now include block hash and block number: This enables easier debugging of eth-call issues. ([#4718](https://github.com/graphprotocol/graph-node/pull/4718))
+- Enabled support for substreams on already supported networks. ([#4767](https://github.com/graphprotocol/graph-node/pull/4767))
+- Add new GraphQL scalar type `Int8`. This new scalar type allows subgraph developers to represent 8-bit signed integers. ([#4511](https://github.com/graphprotocol/graph-node/pull/4511))
+- Add support for overriding module params for substreams-based subgraphs when params are provided in the subgraph manifest. ([#4759](https://github.com/graphprotocol/graph-node/pull/4759))
+
+### Breaking changes
+
+- Duplicate provider labels are not allowed in graph-node config anymore
+
+### Bug fixes
+
+- Fixed `PublicProofsOfIndexing` returning the error `Null value resolved for non-null field proofOfIndexing` when fetching POIs for blocks that are not in the cache ([#4768](https://github.com/graphprotocol/graph-node/pull/4768))
+- Fixed an issue where Block stream would fail when switching back to an RPC-based block ingestor from a Firehose ingestor. ([#4790](https://github.com/graphprotocol/graph-node/pull/4790))
+- Fixed an issue where derived loaders were not working with entities with Bytes as IDs ([#4773](https://github.com/graphprotocol/graph-node/pull/4773))
+- Firehose connection test now retries for 30 secs before setting the provider status to `Broken` ([#4754](https://github.com/graphprotocol/graph-node/pull/4754))
+- Fixed the `nonFatalErrors` field not populating in the index node API. ([#4615](https://github.com/graphprotocol/graph-node/pull/4615))
+- Fixed `graph-node` panicking on the first startup when both Firehose and RPC providers are configured together. ([#4680](https://github.com/graphprotocol/graph-node/pull/4680))
+- Fixed block ingestor failing to startup with the error `net version for chain mainnet has changed from 0 to 1` when switching from Firehose to an RPC provider. ([#4692](https://github.com/graphprotocol/graph-node/pull/4692))
+- Fixed Firehose endpoints getting rate-limited due to duplicated providers during connection pool initialization. ([#4778](https://github.com/graphprotocol/graph-node/pull/4778))
+- Fixed a determinism issue where stale entities where being returned when using `get_many` and `get_derived` ([#4801]https://github.com/graphprotocol/graph-node/pull/4801)
+
+### Graphman
+
+- Added two new `graphman` commands `pause` and `resume`: Instead of reassigning to a non-existent node these commands can now be used for pausing and resuming subgraphs. ([#4642](https://github.com/graphprotocol/graph-node/pull/4642))
+- Added a new `graphman` command `restart` to restart a subgraph. ([#4742](https://github.com/graphprotocol/graph-node/pull/4742))
+
+**Full Changelog**: https://github.com/graphprotocol/graph-node/compare/v0.31.0...c350e4f35c49bcf8a8b521851f790234ba2c0295
 
 <!--
-Note: the changes in this PR were technically released in v0.31.0, but the feature also requires changes to graph-cli, which at the time of writing has NOT been released. This feature will make it into the release notes of graph-node only once graph-cli has been updated.
-
-Derived fields getter by @flametuner in https://github.com/grahprotocol/graph-node/pull/4434
--->
+Not Relevant
+- Fix subgraph_features migration. ([#4717](https://github.com/graphprotocol/graph-node/pull/4717))
+- Fix(graphman): Increase default sleep after stopping sg. ([#4703](https://github.com/graphprotocol/graph-node/pull/4703))
+- Fix derived loader not working on certain fields. ([#4683](https://github.com/graphprotocol/graph-node/pull/4683))
+- Firehose/substreams: add 'bearer' in authorization field. ([#4714](https://github.com/graphprotocol/graph-node/pull/4714))
+- Reduce CI flakiness: disable TCP checksum offloading by @neysofu in https://github.com/graphprotocol/graph-node/pull/4684
+- env: Decrease default GRAPH_MAX_IPFS_FILE_BYTES by @leoyvens in https://github.com/graphprotocol/graph-node/pull/4669
+- add a retry(5) when refetch_firehose_block fails by @sduchesneau in https://github.com/graphprotocol/graph-node/pull/4681
+- Reset block stream only when there is onchain datasource created by @incrypto32 in https://github.com/graphprotocol/graph-node/pull/4700
+- Fix nightly code coverage run by @neysofu in https://github.com/graphprotocol/graph-node/pull/4685
+- Move create_subgraph_features to build_subgraph_runner by @incrypto32 in https://github.com/graphprotocol/graph-node/pull/4699
+- Revert "delete 'shallow blocks' in block cache when not using firehose (#4691)" by @leoyvens in https://github.com/graphprotocol/graph-node/pull/4752
+- Docs: Add offchain data sources implementation guide. ([#4696](https://github.com/graphprotocol/graph-node/pull/4696))
+ -->
 
 ## v0.31.0
 
@@ -61,8 +108,6 @@ Derived fields getter by @flametuner in https://github.com/grahprotocol/graph-no
 
 ### Graphman
 
-- `graphman rewind` now requires `block-number` and `block-hash` to be passed as flags instead of arguments. [#4400](https://github.com/graphprotocol/graph-node/pull/4400)
-- You can now use the new flag `--start-block` in `graphman rewind` to rewind a subgraph to the `startBlock` set in manifest, or to the genesis block if no `startBlock` is set. [#4400](https://github.com/graphprotocol/graph-node/pull/4400)
 - The behavior for `graphman prune` has changed: running just `graphman prune` will mark the subgraph for ongoing pruning in addition to performing an initial pruning. To avoid ongoing pruning, use `graphman prune --once` ([docs](./docs/implementation/pruning.md)). [#4429](https://github.com/graphprotocol/graph-node/pull/4429)
 - The env. var. `GRAPH_STORE_HISTORY_COPY_THRESHOLD` –which serves as a configuration setting for `graphman prune`– has been renamed to `GRAPH_STORE_HISTORY_REBUILD_THRESHOLD`. [#4505](https://github.com/graphprotocol/graph-node/pull/4505)
 - You can now list all existing deployments via `graphman info --all`. [#4347](https://github.com/graphprotocol/graph-node/pull/4347)

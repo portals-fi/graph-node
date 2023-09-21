@@ -13,6 +13,9 @@ use graph::prelude::{
     CreateSubgraphResult, SubgraphAssignmentProvider as SubgraphAssignmentProviderTrait,
     SubgraphRegistrar as SubgraphRegistrarTrait, *,
 };
+use graph::tokio_retry::Retry;
+use graph::util::futures::retry_strategy;
+use graph::util::futures::RETRY_DEFAULT_LIMIT;
 
 pub struct SubgraphRegistrar<P, S, SM> {
     logger: Logger,
@@ -518,15 +521,18 @@ async fn resolve_start_block(
         .expect("cannot identify minimum start block because there are no data sources")
     {
         0 => Ok(None),
-        min_start_block => chain
-            .block_pointer_from_number(logger, min_start_block - 1)
-            .await
-            .map(Some)
-            .map_err(move |_| {
-                SubgraphRegistrarError::ManifestValidationError(vec![
-                    SubgraphManifestValidationError::BlockNotFound(min_start_block.to_string()),
-                ])
-            }),
+        min_start_block => Retry::spawn(retry_strategy(Some(2), RETRY_DEFAULT_LIMIT), move || {
+            chain
+                .block_pointer_from_number(&logger, min_start_block - 1)
+                .inspect_err(move |e| warn!(&logger, "Failed to get block number: {}", e))
+        })
+        .await
+        .map(Some)
+        .map_err(move |_| {
+            SubgraphRegistrarError::ManifestValidationError(vec![
+                SubgraphManifestValidationError::BlockNotFound(min_start_block.to_string()),
+            ])
+        }),
     }
 }
 
@@ -566,7 +572,7 @@ async fn create_subgraph_version<C: Blockchain, S: SubgraphStore>(
 ) -> Result<DeploymentLocator, SubgraphRegistrarError> {
     let raw_string = serde_yaml::to_string(&raw).unwrap();
     let unvalidated = UnvalidatedSubgraphManifest::<C>::resolve(
-        deployment,
+        deployment.clone(),
         raw,
         resolver,
         logger,
@@ -575,8 +581,17 @@ async fn create_subgraph_version<C: Blockchain, S: SubgraphStore>(
     .map_err(SubgraphRegistrarError::ResolveError)
     .await?;
 
+    // Determine if the graft_base should be validated.
+    // Validate the graft_base if there is a pending graft, ensuring its presence.
+    // If the subgraph is new (indicated by DeploymentNotFound), the graft_base should be validated.
+    // If the subgraph already exists and there is no pending graft, graft_base validation is not required.
+    let should_validate = match store.graft_pending(&deployment) {
+        Ok(graft_pending) => graft_pending,
+        Err(StoreError::DeploymentNotFound(_)) => true,
+        Err(e) => return Err(SubgraphRegistrarError::StoreError(e)),
+    };
     let manifest = unvalidated
-        .validate(store.cheap_clone(), true)
+        .validate(store.cheap_clone(), should_validate)
         .await
         .map_err(SubgraphRegistrarError::ManifestValidationError)?;
 
@@ -661,7 +676,6 @@ async fn create_subgraph_version<C: Blockchain, S: SubgraphStore>(
             name,
             &manifest.schema,
             deployment,
-            manifest.deployment_features(),
             node_id,
             network_name,
             version_switching_mode,

@@ -62,6 +62,7 @@ fn data_source_helpers() {
     let onchain = DataSource::<MockBlockchain>::Onchain(MockDataSource {
         api_version: Version::new(1, 0, 0),
         kind: "mock/kind".into(),
+        network: Some("mock_network".into()),
     });
     assert!(onchain.causality_region() == CausalityRegion::ONCHAIN);
     assert!(onchain.as_offchain().is_none());
@@ -69,7 +70,7 @@ fn data_source_helpers() {
 
 fn new_datasource() -> offchain::DataSource {
     offchain::DataSource::new(
-        "theKind".into(),
+        offchain::OffchainDataSourceKind::Ipfs,
         "theName".into(),
         0,
         Source::Ipfs(CidFile {

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -9,12 +9,14 @@ use crate::cheap_clone::CheapClone;
 use crate::components::store::{EntityKey, EntityType, LoadRelatedRequest};
 use crate::data::graphql::ext::DirectiveFinder;
 use crate::data::graphql::{DirectiveExt, DocumentExt, ObjectTypeExt, TypeExt, ValueExt};
-use crate::data::store::{self, scalar, IntoEntityIterator, TryIntoEntityIterator};
+use crate::data::store::{
+    self, scalar, EntityValidationError, IntoEntityIterator, TryIntoEntityIterator,
+};
 use crate::data::subgraph::schema::POI_DIGEST;
 use crate::prelude::q::Value;
 use crate::prelude::{s, DeploymentHash};
 use crate::schema::api_schema;
-use crate::util::intern::AtomPool;
+use crate::util::intern::{Atom, AtomPool};
 
 use super::fulltext::FulltextDefinition;
 use super::{ApiSchema, Schema, SchemaValidationError};
@@ -33,6 +35,8 @@ pub struct InputSchema {
 pub struct Inner {
     schema: Schema,
     immutable_types: HashSet<EntityType>,
+    // Maps each entity type to its field names
+    field_names: HashMap<EntityType, Vec<Atom>>,
     pool: Arc<AtomPool>,
 }
 
@@ -57,10 +61,26 @@ impl InputSchema {
 
         let pool = Arc::new(atom_pool(&schema.document));
 
+        let field_names = HashMap::from_iter(
+            schema
+                .document
+                .get_object_type_definitions()
+                .into_iter()
+                .map(|obj_type| {
+                    let fields: Vec<_> = obj_type
+                        .fields
+                        .iter()
+                        .map(|field| pool.lookup(&field.name).unwrap())
+                        .collect();
+                    (EntityType::from(obj_type), fields)
+                }),
+        );
+
         Self {
             inner: Arc::new(Inner {
                 schema,
                 immutable_types,
+                field_names,
                 pool,
             }),
         }
@@ -120,7 +140,34 @@ impl InputSchema {
     ///
     /// When asked to load the related entities from "Account" in the field "wallets"
     /// This function will return the type "Wallet" with the field "account"
-    pub fn get_field_related(&self, key: &LoadRelatedRequest) -> Result<(&str, &s::Field), Error> {
+    pub fn get_field_related(
+        &self,
+        key: &LoadRelatedRequest,
+    ) -> Result<(&str, &s::Field, bool), Error> {
+        let id_field = self
+            .inner
+            .schema
+            .document
+            .get_object_type_definition(key.entity_type.as_str())
+            .ok_or_else(|| {
+                anyhow!(
+                    "Entity {}[{}]: unknown entity type `{}`",
+                    key.entity_type,
+                    key.entity_id,
+                    key.entity_type,
+                )
+            })?
+            .field("id")
+            .ok_or_else(|| {
+                anyhow!(
+                    "Entity {}[{}]: unknown field `{}`",
+                    key.entity_type,
+                    key.entity_id,
+                    key.entity_field,
+                )
+            })?;
+
+        let id_is_bytes = id_field.field_type.get_base_type() == "Bytes";
         let field = self
             .inner
             .schema
@@ -171,7 +218,7 @@ impl InputSchema {
                     )
                 })?;
 
-            Ok((base_type, field))
+            Ok((base_type, field, id_is_bytes))
         } else {
             Err(anyhow!(
                 "Entity {}[{}]: field `{}` is not derived",
@@ -308,7 +355,10 @@ impl InputSchema {
         self.inner.schema.validate()
     }
 
-    pub fn make_entity<I: IntoEntityIterator>(&self, iter: I) -> Result<Entity, Error> {
+    pub fn make_entity<I: IntoEntityIterator>(
+        &self,
+        iter: I,
+    ) -> Result<Entity, EntityValidationError> {
         Entity::make(self.inner.pool.clone(), iter)
     }
 
@@ -320,6 +370,14 @@ impl InputSchema {
         iter: I,
     ) -> Result<Entity, Error> {
         Entity::try_make(self.inner.pool.clone(), iter)
+    }
+
+    pub fn has_field(&self, entity_type: &EntityType, field: Atom) -> bool {
+        self.inner
+            .field_names
+            .get(entity_type)
+            .map(|fields| fields.contains(&field))
+            .unwrap_or(false)
     }
 }
 

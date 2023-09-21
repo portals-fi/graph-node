@@ -1,6 +1,6 @@
 use diesel::{self, PgConnection};
 use graph::blockchain::mock::MockDataSource;
-use graph::data::graphql::effort::LoadManager;
+use graph::data::graphql::load_manager::LoadManager;
 use graph::data::query::QueryResults;
 use graph::data::query::QueryTarget;
 use graph::data::subgraph::schema::{DeploymentCreate, SubgraphError};
@@ -39,6 +39,7 @@ use tokio::runtime::{Builder, Runtime};
 use web3::types::H256;
 
 pub const NETWORK_NAME: &str = "fake_network";
+pub const DATA_SOURCE_KIND: &str = "mock/kind";
 pub const NETWORK_VERSION: &str = "graph test suite";
 
 pub use graph_store_postgres::Store;
@@ -56,6 +57,7 @@ lazy_static! {
     pub static ref METRICS_REGISTRY: Arc<MetricsRegistry> = Arc::new(MetricsRegistry::mock());
     pub static ref LOAD_MANAGER: Arc<LoadManager> = Arc::new(LoadManager::new(
         &LOGGER,
+        CONFIG.stores.keys().cloned().collect(),
         Vec::new(),
         METRICS_REGISTRY.clone(),
     ));
@@ -188,7 +190,6 @@ pub async fn create_subgraph_with_manifest(
         name,
         &schema,
         deployment,
-        manifest.deployment_features(),
         NODE_ID.clone(),
         NETWORK_NAME.to_string(),
         SubgraphVersionSwitchingMode::Instant,
@@ -229,17 +230,26 @@ pub async fn create_test_subgraph_with_features(
         repository: Some(format!("repo for {}", subgraph_id)),
         schema: schema.clone(),
         data_sources: vec![DataSource::Onchain(MockDataSource {
-            kind: "mock/kind".into(),
+            kind: DATA_SOURCE_KIND.into(),
             api_version: Version::new(1, 0, 0),
+            network: Some(NETWORK_NAME.into()),
         })],
         graft: None,
         templates: vec![],
         chain: PhantomData,
     };
 
-    create_subgraph_with_manifest(subgraph_id, schema, manifest, None)
+    let deployment_features = manifest.deployment_features();
+
+    let locator = create_subgraph_with_manifest(subgraph_id, schema, manifest, None)
         .await
-        .unwrap()
+        .unwrap();
+
+    SUBGRAPH_STORE
+        .create_subgraph_features(deployment_features)
+        .unwrap();
+
+    locator
 }
 
 pub fn remove_subgraph(id: &DeploymentHash) {
@@ -527,7 +537,8 @@ async fn execute_subgraph_query_internal(
                 bc,
                 error_policy,
                 query.schema.id().clone(),
-                graphql_metrics()
+                graphql_metrics(),
+                LOAD_MANAGER.clone()
             )
             .await
         );
@@ -539,7 +550,6 @@ async fn execute_subgraph_query_internal(
                 QueryExecutionOptions {
                     resolver,
                     deadline,
-                    load_manager: LOAD_MANAGER.clone(),
                     max_first: std::u32::MAX,
                     max_skip: std::u32::MAX,
                     trace,

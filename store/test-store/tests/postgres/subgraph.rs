@@ -164,7 +164,6 @@ fn create_subgraph() {
                     name,
                     &schema,
                     deployment,
-                    manifest.deployment_features(),
                     node_id,
                     NETWORK_NAME.to_string(),
                     mode,
@@ -509,11 +508,14 @@ fn subgraph_features() {
             api_version,
             features,
             data_source_kinds,
+            network,
+            handler_kinds,
         } = get_subgraph_features(id.to_string()).unwrap();
 
         assert_eq!(NAME, subgraph_id.as_str());
         assert_eq!("1.0.0", spec_version);
         assert_eq!("1.0.0", api_version.unwrap());
+        assert_eq!(NETWORK_NAME, network);
         assert_eq!(
             vec![
                 SubgraphFeature::NonFatalErrors.to_string(),
@@ -522,8 +524,14 @@ fn subgraph_features() {
             features
         );
         assert_eq!(1, data_source_kinds.len());
+        assert_eq!(handler_kinds.len(), 2);
+        assert!(handler_kinds.contains(&"mock_handler_1".to_string()));
+        assert!(handler_kinds.contains(&"mock_handler_2".to_string()));
 
-        test_store::remove_subgraph(&id)
+        test_store::remove_subgraph(&id);
+        let features = get_subgraph_features(id.to_string());
+        // Subgraph was removed, so we expect the entry to be removed from `subgraph_features` table
+        assert!(features.is_none());
     })
 }
 

@@ -3,9 +3,13 @@
   "workspaces": [
     "data-source-revert",
     "data-source-revert2",
+    "data-sources",
     "dynamic-data-source",
     "fatal-error",
     "file-data-sources",
-    "typename"
+    "derived-loaders",
+    "block-handlers",
+    "typename",
+    "arweave-file-data-sources"
   ]
 }

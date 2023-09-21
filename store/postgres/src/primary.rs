@@ -85,6 +85,8 @@ table! {
         api_version -> Nullable<Text>,
         features -> Array<Text>,
         data_sources -> Array<Text>,
+        handlers -> Array<Text>,
+        network -> Text,
     }
 }
 
@@ -622,12 +624,14 @@ mod queries {
         let nodes: HashMap<_, _> = a::table
             .inner_join(ds::table.on(ds::id.eq(a::id)))
             .filter(ds::subgraph.eq(any(ids)))
-            .select((ds::subgraph, a::node_id))
-            .load::<(String, String)>(conn)?
+            .select((ds::subgraph, a::node_id, a::paused_at.is_not_null()))
+            .load::<(String, String, bool)>(conn)?
             .into_iter()
+            .map(|(subgraph, node, paused)| (subgraph, (node, paused)))
             .collect();
         for mut info in infos {
-            info.node = nodes.get(&info.subgraph).cloned()
+            info.node = nodes.get(&info.subgraph).map(|(node, _)| node.clone());
+            info.paused = nodes.get(&info.subgraph).map(|(_, paused)| *paused);
         }
         Ok(())
     }
@@ -1123,19 +1127,33 @@ impl<'a> Connection<'a> {
                 f::api_version,
                 f::features,
                 f::data_sources,
+                f::handlers,
+                f::network,
             ))
-            .first::<(String, String, Option<String>, Vec<String>, Vec<String>)>(conn)
+            .first::<(
+                String,
+                String,
+                Option<String>,
+                Vec<String>,
+                Vec<String>,
+                Vec<String>,
+                String,
+            )>(conn)
             .optional()?;
 
-        let features = features.map(|(id, spec_version, api_version, features, data_sources)| {
-            DeploymentFeatures {
-                id,
-                spec_version,
-                api_version,
-                features,
-                data_source_kinds: data_sources,
-            }
-        });
+        let features = features.map(
+            |(id, spec_version, api_version, features, data_sources, handlers, network)| {
+                DeploymentFeatures {
+                    id,
+                    spec_version,
+                    api_version,
+                    features,
+                    data_source_kinds: data_sources,
+                    handler_kinds: handlers,
+                    network: network,
+                }
+            },
+        );
 
         Ok(features)
     }
@@ -1143,20 +1161,30 @@ impl<'a> Connection<'a> {
     pub fn create_subgraph_features(&self, features: DeploymentFeatures) -> Result<(), StoreError> {
         use subgraph_features as f;
 
+        let DeploymentFeatures {
+            id,
+            spec_version,
+            api_version,
+            features,
+            data_source_kinds,
+            handler_kinds,
+            network,
+        } = features;
+
         let conn = self.conn.as_ref();
         let changes = (
-            f::id.eq(features.id),
-            f::spec_version.eq(features.spec_version),
-            f::api_version.eq(features.api_version),
-            f::features.eq(features.features),
-            f::data_sources.eq(features.data_source_kinds),
+            f::id.eq(id),
+            f::spec_version.eq(spec_version),
+            f::api_version.eq(api_version),
+            f::features.eq(features),
+            f::data_sources.eq(data_source_kinds),
+            f::handlers.eq(handler_kinds),
+            f::network.eq(network),
         );
 
         insert_into(f::table)
             .values(changes.clone())
-            .on_conflict(f::id)
-            .do_update()
-            .set(changes)
+            .on_conflict_do_nothing()
             .execute(conn)?;
         Ok(())
     }
@@ -1247,18 +1275,33 @@ impl<'a> Connection<'a> {
     }
 
     /// Create a site for a brand new deployment.
+    /// If it already exists, return the existing site
+    /// and a boolean indicating whether a new site was created.
+    /// `false` means the site already existed.
     pub fn allocate_site(
         &self,
         shard: Shard,
         subgraph: &DeploymentHash,
         network: String,
-        schema_version: DeploymentSchemaVersion,
-    ) -> Result<Site, StoreError> {
+        graft_base: Option<&DeploymentHash>,
+    ) -> Result<(Site, bool), StoreError> {
         if let Some(site) = queries::find_active_site(self.conn.as_ref(), subgraph)? {
-            return Ok(site);
+            return Ok((site, false));
         }
 
+        let site_was_created = true;
+        let schema_version = match graft_base {
+            Some(graft_base) => {
+                let site = queries::find_active_site(self.conn.as_ref(), graft_base)?;
+                site.map(|site| site.schema_version).ok_or_else(|| {
+                    StoreError::DeploymentNotFound("graft_base not found".to_string())
+                })
+            }
+            None => Ok(DeploymentSchemaVersion::LATEST),
+        }?;
+
         self.create_site(shard, subgraph.clone(), network, schema_version, true)
+            .map(|site| (site, site_was_created))
     }
 
     pub fn assigned_node(&self, site: &Site) -> Result<Option<NodeId>, StoreError> {
@@ -1308,10 +1351,11 @@ impl<'a> Connection<'a> {
             .map(|_| ())
     }
 
-    /// Remove all subgraph versions and the entry in `deployment_schemas` for
-    /// subgraph `id` in a transaction
+    /// Remove all subgraph versions, the entry in `deployment_schemas` and the entry in
+    /// `subgraph_features` for subgraph `id` in a transaction
     pub fn drop_site(&self, site: &Site) -> Result<(), StoreError> {
         use deployment_schemas as ds;
+        use subgraph_features as f;
         use subgraph_version as v;
         use unused_deployments as u;
 
@@ -1329,6 +1373,9 @@ impl<'a> Connection<'a> {
             if !exists {
                 delete(v::table.filter(v::deployment.eq(site.deployment.as_str())))
                     .execute(conn)?;
+
+                // Remove the entry in `subgraph_features`
+                delete(f::table.filter(f::id.eq(site.deployment.as_str()))).execute(conn)?;
             }
 
             update(u::table.filter(u::id.eq(site.id)))

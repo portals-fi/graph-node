@@ -1,21 +1,36 @@
 use std::collections::BTreeMap;
 use std::convert::TryInto;
 
-use either::Either;
 use graph::data::query::Trace;
 use web3::types::Address;
 
+use git_testament::{git_testament, CommitKind};
 use graph::blockchain::{Blockchain, BlockchainKind, BlockchainMap};
-use graph::components::store::{BlockStore, EntityType, Store};
+use graph::components::store::{BlockPtrForNumber, BlockStore, EntityType, Store};
 use graph::components::versions::VERSIONS;
 use graph::data::graphql::{object, IntoValue, ObjectOrInterface, ValueMap};
-use graph::data::subgraph::features::detect_features;
 use graph::data::subgraph::status;
 use graph::data::value::{Object, Word};
 use graph::prelude::*;
 use graph_graphql::prelude::{a, ExecutionContext, Resolver};
 
 use crate::auth::PoiProtection;
+
+/// Timeout for calls to fetch the block from JSON-RPC or Firehose.
+const BLOCK_HASH_FROM_NUMBER_TIMEOUT: Duration = Duration::from_secs(10);
+
+git_testament!(TESTAMENT);
+
+lazy_static! {
+    static ref VERSION: Version = Version {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        commit: match TESTAMENT.commit {
+            CommitKind::FromTag(_, hash, _, _) => hash.to_string(),
+            CommitKind::NoTags(hash, _) => hash.to_string(),
+            _ => "unknown".to_string(),
+        }
+    };
+}
 
 #[derive(Clone, Debug)]
 struct PublicProofOfIndexingRequest {
@@ -34,6 +49,21 @@ impl TryFromValue for PublicProofOfIndexingRequest {
                 "Cannot parse non-object value as PublicProofOfIndexingRequest: {:?}",
                 value
             )),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct Version {
+    version: String,
+    commit: String,
+}
+
+impl IntoValue for Version {
+    fn into_value(self) -> r::Value {
+        object! {
+            version: self.version,
+            commit: self.commit,
         }
     }
 }
@@ -65,6 +95,7 @@ pub struct IndexNodeResolver<S: Store> {
     logger: Logger,
     blockchain_map: Arc<BlockchainMap>,
     store: Arc<S>,
+    #[allow(dead_code)]
     link_resolver: Arc<dyn LinkResolver>,
     bearer_token: Option<String>,
 }
@@ -213,62 +244,10 @@ impl<S: Store> IndexNodeResolver<S> {
             .get_required::<BlockNumber>("blockNumber")
             .expect("Valid blockNumber required");
 
-        macro_rules! try_resolve_for_chain {
-            ( $typ:path ) => {
-                let blockchain = self.blockchain_map.get::<$typ>(network.to_string()).ok();
-
-                if let Some(blockchain) = blockchain {
-                    debug!(
-                        self.logger,
-                        "Fetching block hash from number";
-                        "network" => &network,
-                        "block_number" => block_number,
-                    );
-
-                    let block_ptr_res = blockchain
-                        .block_pointer_from_number(&self.logger, block_number)
-                        .await;
-
-                        if let Err(e) = block_ptr_res {
-                            warn!(
-                                self.logger,
-                                "Failed to fetch block hash from number";
-                                "network" => &network,
-                                "chain" => <$typ as Blockchain>::KIND.to_string(),
-                                "block_number" => block_number,
-                                "error" => e.to_string(),
-                            );
-                            return Ok(r::Value::Null);
-                        }
-
-                    let block_ptr = block_ptr_res.unwrap();
-                    return Ok(r::Value::String(block_ptr.hash_hex()));
-                }
-            };
+        match self.block_ptr_for_number(network, block_number).await? {
+            Some(block_ptr) => Ok(r::Value::String(block_ptr.hash_hex())),
+            None => Ok(r::Value::Null),
         }
-
-        // Ugly, but we can't get back an object trait from the `BlockchainMap`,
-        // so this seems like the next best thing.
-        try_resolve_for_chain!(graph_chain_ethereum::Chain);
-        try_resolve_for_chain!(graph_chain_arweave::Chain);
-        try_resolve_for_chain!(graph_chain_cosmos::Chain);
-        try_resolve_for_chain!(graph_chain_near::Chain);
-
-        // If you're adding support for a new chain and this `match` clause just
-        // gave you a compiler error, then this message is for you! You need to
-        // add a new `try_resolve!` macro invocation above for your new chain
-        // type.
-        match BlockchainKind::Ethereum {
-            // Note: we don't actually care about substreams here.
-            BlockchainKind::Substreams
-            | BlockchainKind::Arweave
-            | BlockchainKind::Ethereum
-            | BlockchainKind::Cosmos
-            | BlockchainKind::Near => (),
-        }
-
-        // The given network does not exist.
-        Ok(r::Value::Null)
     }
 
     async fn resolve_cached_ethereum_calls(
@@ -406,7 +385,7 @@ impl<S: Store> IndexNodeResolver<S> {
         Ok(poi)
     }
 
-    fn resolve_public_proofs_of_indexing(
+    async fn resolve_public_proofs_of_indexing(
         &self,
         field: &a::Field,
     ) -> Result<r::Value, QueryExecutionError> {
@@ -421,41 +400,41 @@ impl<S: Store> IndexNodeResolver<S> {
             return Err(QueryExecutionError::TooExpensive);
         }
 
-        Ok(r::Value::List(
-            requests
-                .into_iter()
-                .map(|request| {
-                    match futures::executor::block_on(
-                        self.store.get_public_proof_of_indexing(
-                            &request.deployment,
-                            request.block_number,
-                        ),
-                    ) {
-                        Ok(Some(poi)) => (Some(poi), request),
-                        Ok(None) => (None, request),
-                        Err(e) => {
-                            error!(
-                                self.logger,
-                                "Failed to query public proof of indexing";
-                                "subgraph" => &request.deployment,
-                                "block" => format!("{}", request.block_number),
-                                "error" => format!("{:?}", e)
-                            );
-                            (None, request)
-                        }
-                    }
-                })
-                .map(|(poi_result, request)| PublicProofOfIndexingResult {
+        let mut public_poi_results = vec![];
+        for request in requests {
+            let (poi_result, request) = match self
+                .store
+                .get_public_proof_of_indexing(&request.deployment, request.block_number, self)
+                .await
+            {
+                Ok(Some(poi)) => (Some(poi), request),
+                Ok(None) => (None, request),
+                Err(e) => {
+                    error!(
+                        self.logger,
+                        "Failed to query public proof of indexing";
+                        "subgraph" => &request.deployment,
+                        "block" => format!("{}", request.block_number),
+                        "error" => format!("{:?}", e)
+                    );
+                    (None, request)
+                }
+            };
+
+            public_poi_results.push(
+                PublicProofOfIndexingResult {
                     deployment: request.deployment,
                     block: match poi_result {
                         Some((ref block, _)) => block.clone(),
                         None => PartialBlockPtr::from(request.block_number),
                     },
                     proof_of_indexing: poi_result.map(|(_, poi)| poi),
-                })
-                .map(IntoValue::into_value)
-                .collect(),
-        ))
+                }
+                .into_value(),
+            )
+        }
+
+        Ok(r::Value::List(public_poi_results))
     }
 
     fn resolve_indexing_status_for_version(
@@ -494,125 +473,15 @@ impl<S: Store> IndexNodeResolver<S> {
         // We can safely unwrap because the argument is non-nullable and has been validated.
         let subgraph_id = field.get_required::<String>("subgraphId").unwrap();
 
-        // TODO:
-        //
-        // An interesting optimization would involve trying to get the subgraph manifest from the
-        // SubgraphStore before hitting IPFS, but we must fix a dependency cycle between the `graph`
-        // and `server` crates first.
-        //
-        // 1. implement a new method in subgraph store to retrieve the SubgraphManifest of a given deployment id
-        // 2. try to fetch this subgraph from our SubgraphStore before hitting IPFS
-
         // Try to build a deployment hash with the input string
         let deployment_hash = DeploymentHash::new(subgraph_id).map_err(|invalid_qm_hash| {
             QueryExecutionError::SubgraphDeploymentIdError(invalid_qm_hash)
         })?;
 
-        let ValidationPostProcessResult {
-            features,
-            errors,
-            network,
-        } = {
-            let raw: serde_yaml::Mapping = {
-                let file_bytes = self
-                    .link_resolver
-                    .cat(&self.logger, &deployment_hash.to_ipfs_link())
-                    .await
-                    .map_err(SubgraphManifestResolveError::ResolveError)?;
+        let subgraph_store = self.store.subgraph_store();
+        let deployment_features = subgraph_store.subgraph_features(&deployment_hash).await?;
 
-                serde_yaml::from_slice(&file_bytes)
-                    .map_err(SubgraphManifestResolveError::ParseError)?
-            };
-
-            let kind = BlockchainKind::from_manifest(&raw)
-                .map_err(SubgraphManifestResolveError::ResolveError)?;
-            match kind {
-                BlockchainKind::Ethereum => {
-                    let unvalidated_subgraph_manifest =
-                        UnvalidatedSubgraphManifest::<graph_chain_ethereum::Chain>::resolve(
-                            deployment_hash,
-                            raw,
-                            &self.link_resolver,
-                            &self.logger,
-                            ENV_VARS.max_spec_version.clone(),
-                        )
-                        .await?;
-
-                    validate_and_extract_features(
-                        &self.store.subgraph_store(),
-                        unvalidated_subgraph_manifest,
-                    )
-                    .await?
-                }
-
-                BlockchainKind::Cosmos => {
-                    let unvalidated_subgraph_manifest =
-                        UnvalidatedSubgraphManifest::<graph_chain_cosmos::Chain>::resolve(
-                            deployment_hash,
-                            raw,
-                            &self.link_resolver,
-                            &self.logger,
-                            ENV_VARS.max_spec_version.clone(),
-                        )
-                        .await?;
-
-                    validate_and_extract_features(
-                        &self.store.subgraph_store(),
-                        unvalidated_subgraph_manifest,
-                    )
-                    .await?
-                }
-
-                BlockchainKind::Near => {
-                    let unvalidated_subgraph_manifest =
-                        UnvalidatedSubgraphManifest::<graph_chain_near::Chain>::resolve(
-                            deployment_hash,
-                            raw,
-                            &self.link_resolver,
-                            &self.logger,
-                            ENV_VARS.max_spec_version.clone(),
-                        )
-                        .await?;
-
-                    validate_and_extract_features(
-                        &self.store.subgraph_store(),
-                        unvalidated_subgraph_manifest,
-                    )
-                    .await?
-                }
-
-                BlockchainKind::Arweave => {
-                    let unvalidated_subgraph_manifest =
-                        UnvalidatedSubgraphManifest::<graph_chain_arweave::Chain>::resolve(
-                            deployment_hash,
-                            raw,
-                            &self.link_resolver,
-                            &self.logger,
-                            ENV_VARS.max_spec_version.clone(),
-                        )
-                        .await?;
-
-                    validate_and_extract_features(
-                        &self.store.subgraph_store(),
-                        unvalidated_subgraph_manifest,
-                    )
-                    .await?
-                }
-                // TODO(filipe): Kick this can down the road!
-                BlockchainKind::Substreams => unimplemented!(),
-            }
-        };
-
-        // We then bulid a GraphqQL `Object` value that contains the feature detection and
-        // validation results and send it back as a response.
-        let response = [
-            ("features".into(), features),
-            ("errors".into(), errors),
-            ("network".into(), network),
-        ];
-        let response = Object::from_iter(response);
-
-        Ok(r::Value::Object(response))
+        Ok(deployment_features.into_value())
     }
 
     fn resolve_api_versions(&self, _field: &a::Field) -> Result<r::Value, QueryExecutionError> {
@@ -628,98 +497,88 @@ impl<S: Store> IndexNodeResolver<S> {
                 .collect(),
         ))
     }
+
+    fn version(&self) -> Result<r::Value, QueryExecutionError> {
+        Ok(VERSION.clone().into_value())
+    }
+
+    async fn block_ptr_for_number(
+        &self,
+        network: String,
+        block_number: BlockNumber,
+    ) -> Result<Option<BlockPtr>, QueryExecutionError> {
+        macro_rules! try_resolve_for_chain {
+            ( $typ:path ) => {
+                let blockchain = self.blockchain_map.get::<$typ>(network.to_string()).ok();
+
+                if let Some(blockchain) = blockchain {
+                    debug!(
+                        self.logger,
+                        "Fetching block hash from number";
+                        "network" => &network,
+                        "block_number" => block_number,
+                    );
+
+                let block_ptr_res = tokio::time::timeout(BLOCK_HASH_FROM_NUMBER_TIMEOUT, blockchain
+                    .block_pointer_from_number(&self.logger, block_number)
+                    .map_err(Error::from))
+                    .await
+                    .map_err(Error::from)
+                    .and_then(|x| x);
+
+                        if let Err(e) = block_ptr_res {
+                            warn!(
+                                self.logger,
+                                "Failed to fetch block hash from number";
+                                "network" => &network,
+                                "chain" => <$typ as Blockchain>::KIND.to_string(),
+                                "block_number" => block_number,
+                                "error" => e.to_string(),
+                            );
+                            return Ok(None);
+                        }
+
+                    let block_ptr = block_ptr_res.unwrap();
+                    return Ok(Some(block_ptr));
+                }
+            };
+        }
+
+        // Ugly, but we can't get back an object trait from the `BlockchainMap`,
+        // so this seems like the next best thing.
+        try_resolve_for_chain!(graph_chain_ethereum::Chain);
+        try_resolve_for_chain!(graph_chain_arweave::Chain);
+        try_resolve_for_chain!(graph_chain_cosmos::Chain);
+        try_resolve_for_chain!(graph_chain_near::Chain);
+
+        // If you're adding support for a new chain and this `match` clause just
+        // gave you a compiler error, then this message is for you! You need to
+        // add a new `try_resolve!` macro invocation above for your new chain
+        // type.
+        match BlockchainKind::Ethereum {
+            // Note: we don't actually care about substreams here.
+            BlockchainKind::Substreams
+            | BlockchainKind::Arweave
+            | BlockchainKind::Ethereum
+            | BlockchainKind::Cosmos
+            | BlockchainKind::Near => (),
+        }
+
+        // The given network does not exist.
+        Ok(None)
+    }
 }
 
-struct ValidationPostProcessResult {
-    features: r::Value,
-    errors: r::Value,
-    network: r::Value,
-}
-
-async fn validate_and_extract_features<C, SgStore>(
-    subgraph_store: &Arc<SgStore>,
-    unvalidated_subgraph_manifest: UnvalidatedSubgraphManifest<C>,
-) -> Result<ValidationPostProcessResult, QueryExecutionError>
-where
-    C: Blockchain,
-    SgStore: SubgraphStore,
-{
-    // Validate the subgraph we've just obtained.
-    //
-    // Note that feature valiadation errors will be inside the error variant vector (because
-    // `validate` also validates subgraph features), so we must filter them out to build our
-    // response.
-    let subgraph_validation: Either<_, _> = match unvalidated_subgraph_manifest
-        .validate(subgraph_store.clone(), false)
-        .await
-    {
-        Ok(subgraph_manifest) => Either::Left(subgraph_manifest),
-        Err(validation_errors) => {
-            // We must ensure that all the errors are of the `FeatureValidationError`
-            // variant and that there is at least one error of that kind.
-            let feature_validation_errors: Vec<_> = validation_errors
-                .into_iter()
-                .filter(|error| {
-                    matches!(
-                        error,
-                        SubgraphManifestValidationError::FeatureValidationError(_)
-                    )
-                })
-                .collect();
-
-            if !feature_validation_errors.is_empty() {
-                Either::Right(feature_validation_errors)
-            } else {
-                // If other error variants are present or there are no feature validation
-                // errors, we must return early with an error.
-                //
-                // It might be useful to return a more thoughtful error, but that is not the
-                // purpose of this endpoint.
-                return Err(QueryExecutionError::InvalidSubgraphManifest);
-            }
-        }
-    };
-
-    // At this point, we have either:
-    // 1. A valid subgraph manifest with no errors.
-    // 2. No subgraph manifest and a set of feature validation errors.
-    //
-    // For this step we must collect whichever results we have into GraphQL `Value` types.
-    match subgraph_validation {
-        Either::Left(subgraph_manifest) => {
-            let features = r::Value::List(
-                detect_features(&subgraph_manifest)
-                    .map_err(|_| QueryExecutionError::InvalidSubgraphManifest)?
-                    .iter()
-                    .map(ToString::to_string)
-                    .map(r::Value::String)
-                    .collect(),
-            );
-            let errors = r::Value::List(vec![]);
-            let network = r::Value::String(subgraph_manifest.network_name());
-
-            Ok(ValidationPostProcessResult {
-                features,
-                errors,
-                network,
-            })
-        }
-        Either::Right(errors) => {
-            let features = r::Value::List(vec![]);
-            let errors = r::Value::List(
-                errors
-                    .iter()
-                    .map(ToString::to_string)
-                    .map(r::Value::String)
-                    .collect(),
-            );
-            let network = r::Value::Null;
-            Ok(ValidationPostProcessResult {
-                features,
-                errors,
-                network,
-            })
-        }
+#[async_trait]
+impl<S: Store> BlockPtrForNumber for IndexNodeResolver<S> {
+    async fn block_ptr_for_number(
+        &self,
+        network: String,
+        block_number: BlockNumber,
+    ) -> Result<Option<BlockPtr>, Error> {
+        self.block_ptr_for_number(network, block_number)
+            .map_err(Error::from)
+            .await
     }
 }
 
@@ -847,7 +706,7 @@ impl<S: Store> Resolver for IndexNodeResolver<S> {
 
             // The top-level `publicProofsOfIndexing` field
             (None, "PublicProofOfIndexingResult", "publicProofsOfIndexing") => {
-                self.resolve_public_proofs_of_indexing(field)
+                self.resolve_public_proofs_of_indexing(field).await
             }
 
             // Resolve fields of `Object` values (e.g. the `chains` field of `ChainIndexingStatus`)
@@ -874,6 +733,7 @@ impl<S: Store> Resolver for IndexNodeResolver<S> {
             (None, "entityChangesInBlock") => self.resolve_entity_changes_in_block(field),
             // The top-level `subgraphVersions` field
             (None, "apiVersions") => self.resolve_api_versions(field),
+            (None, "version") => self.version(),
 
             // Resolve fields of `Object` values (e.g. the `latestBlock` field of `EthereumBlock`)
             (value, _) => Ok(value.unwrap_or(r::Value::Null)),

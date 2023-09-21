@@ -10,6 +10,7 @@ pub mod status;
 
 pub use features::{SubgraphFeature, SubgraphFeatureValidationError};
 
+use crate::object;
 use anyhow::{anyhow, Context, Error};
 use futures03::{future::try_join3, stream::FuturesOrdered, TryStreamExt as _};
 use itertools::Itertools;
@@ -54,7 +55,7 @@ use std::ops::Deref;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use super::value::Word;
+use super::{graphql::IntoValue, value::Word};
 
 /// Deserialize an Address (with or without '0x' prefix).
 fn deserialize_address<'de, D>(deserializer: D) -> Result<Option<Address>, D::Error>
@@ -505,6 +506,22 @@ pub struct DeploymentFeatures {
     pub api_version: Option<String>,
     pub features: Vec<String>,
     pub data_source_kinds: Vec<String>,
+    pub network: String,
+    pub handler_kinds: Vec<String>,
+}
+
+impl IntoValue for DeploymentFeatures {
+    fn into_value(self) -> r::Value {
+        object! {
+            __typename: "SubgraphFeatures",
+            specVersion: self.spec_version,
+            apiVersion: self.api_version,
+            features: self.features,
+            dataSources: self.data_source_kinds,
+            handlers: self.handler_kinds,
+            network: self.network,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -675,9 +692,17 @@ impl<C: Blockchain> SubgraphManifest<C> {
 
     pub fn deployment_features(&self) -> DeploymentFeatures {
         let unified_api_version = self.unified_mapping_api_version().ok();
+        let network = self.network_name();
         let api_version = unified_api_version
             .map(|v| v.version().map(|v| v.to_string()))
             .flatten();
+
+        let handler_kinds = self
+            .data_sources
+            .iter()
+            .map(|ds| ds.handler_kinds())
+            .flatten()
+            .collect::<HashSet<_>>();
 
         let features: Vec<String> = self
             .features
@@ -700,13 +725,17 @@ impl<C: Blockchain> SubgraphManifest<C> {
             .collect::<Vec<_>>();
 
         data_source_kinds.extend(data_source_template_kinds);
-
         DeploymentFeatures {
             id: self.id.to_string(),
             api_version,
             features,
             spec_version,
             data_source_kinds: data_source_kinds.into_iter().collect_vec(),
+            handler_kinds: handler_kinds
+                .into_iter()
+                .map(|s| s.to_string())
+                .collect_vec(),
+            network,
         }
     }
 
@@ -820,11 +849,26 @@ impl<C: Blockchain> UnresolvedSubgraphManifest<C> {
         if spec_version < SPEC_VERSION_0_0_7
             && data_sources
                 .iter()
-                .any(|ds| OFFCHAIN_KINDS.contains(&ds.kind()))
+                .any(|ds| OFFCHAIN_KINDS.contains_key(ds.kind().as_str()))
         {
             bail!(
                 "Offchain data sources not supported prior to {}",
                 SPEC_VERSION_0_0_7
+            );
+        }
+
+        // Check the min_spec_version of each data source against the spec version of the subgraph
+        let min_spec_version_mismatch = data_sources
+            .iter()
+            .find(|ds| spec_version < ds.min_spec_version());
+
+        if let Some(min_spec_version_mismatch) = min_spec_version_mismatch {
+            bail!(
+                "Subgraph `{}` uses spec version {}, but data source `{}` requires at least version {}",
+                id,
+                spec_version,
+                min_spec_version_mismatch.name(),
+                min_spec_version_mismatch.min_spec_version()
             );
         }
 

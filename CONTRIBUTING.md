@@ -5,7 +5,7 @@ Welcome to the Graph Protocol! Thanks a ton for your interest in contributing.
 
 If you run into any problems feel free to create an issue. PRs are much appreciated for simple things. Here's [a list of good first issues](https://github.com/graphprotocol/graph-node/labels/good%20first%20issue). If it's something more complex we'd appreciate having a quick chat in GitHub Issues or Discord.
 
-Join the conversation on our [Discord](https://discord.gg/9a5VCua).
+Join the conversation on our [Discord](https://discord.gg/graphprotocol).
 
 Please follow the [Code of Conduct](https://github.com/graphprotocol/graph-node/blob/master/CODE_OF_CONDUCT.md) for all the communications and at events. Thank you!
 
@@ -79,7 +79,7 @@ Please do not merge master into your branch as you develop your pull
 request; instead, rebase your branch on top of the latest master if your
 pull request branch is long-lived.
 
-We try to keep the hostory of the `master` branch linear, and avoid merge
+We try to keep the history of the `master` branch linear, and avoid merge
 commits. Once your pull request is approved, merge it following these
 steps:
 ```
