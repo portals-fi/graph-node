@@ -131,7 +131,7 @@ impl EthereumNetworkAdapters {
 
             let block_number = Future::wait(adapter.adapter.block_number(&adapter.logger))?;
 
-            let in_range = block_number - required_capabilities.block - 64 <= 0;
+            let in_range = block_number - required_capabilities.block - 32 <= 0;
             println!("in_range: {:?}", in_range);
             println!(
                 "got block_number: {:?} we want {:?}",
