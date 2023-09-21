@@ -1537,7 +1537,6 @@ pub(crate) async fn get_calls(
             } else {
                 client
                     .rpc()?
-                    .clone()
                     .cheapest_with(&RequiredNodeCapabilities {
                         archive: capabilities.archive,
                         traces: capabilities.traces,

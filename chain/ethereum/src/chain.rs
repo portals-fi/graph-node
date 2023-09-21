@@ -598,7 +598,6 @@ impl TriggersAdapterTrait<Chain> for TriggersAdapter {
         blocks_with_triggers(
             self.chain_client
                 .rpc()?
-                .clone()
                 .cheapest_with(&from_node_capabilities(&self.capabilities, -1))?,
             self.logger.clone(),
             self.chain_store.clone(),
@@ -633,7 +632,6 @@ impl TriggersAdapterTrait<Chain> for TriggersAdapter {
                 let adapter = self
                     .chain_client
                     .rpc()?
-                    .clone()
                     .cheapest_with(&from_node_capabilities(&self.capabilities, -1))?;
 
                 let blocks = blocks_with_triggers(
@@ -703,7 +701,6 @@ impl TriggersAdapterTrait<Chain> for TriggersAdapter {
             }),
             ChainClient::Rpc(adapters) => {
                 let blocks = adapters
-                    .clone()
                     .cheapest_with(&from_node_capabilities(&self.capabilities, -1))?
                     .load_blocks(
                         self.logger.cheap_clone(),
