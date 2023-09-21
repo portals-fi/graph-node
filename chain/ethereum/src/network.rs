@@ -88,7 +88,7 @@ impl Default for EthereumNetworkAdapters {
 }
 
 impl EthereumNetworkAdapters {
-    pub fn new(retest_percent: Option<f64>) -> Self {
+    pub fn new(_retest_percent: Option<f64>) -> Self {
         Self {
             adapters: vec![],
             call_only_adapters: vec![],

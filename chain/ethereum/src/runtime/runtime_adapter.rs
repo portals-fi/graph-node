@@ -3,9 +3,8 @@ use std::{sync::Arc, time::Instant};
 use crate::data_source::MappingABI;
 use crate::network::RequiredNodeCapabilities;
 use crate::{
-    capabilities::NodeCapabilities, network::EthereumNetworkAdapters, Chain, DataSource,
-    EthereumAdapter, EthereumAdapterTrait, EthereumContractCall, EthereumContractCallError,
-    ENV_VARS,
+    network::EthereumNetworkAdapters, Chain, DataSource, EthereumAdapter, EthereumAdapterTrait,
+    EthereumContractCall, EthereumContractCallError, ENV_VARS,
 };
 use anyhow::{Context, Error};
 use blockchain::HostFn;

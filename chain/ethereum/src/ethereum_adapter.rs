@@ -45,7 +45,6 @@ use std::time::Instant;
 
 use crate::adapter::ProviderStatus;
 use crate::chain::BlockFinality;
-use crate::network::EthereumNetworkAdapters;
 use crate::network::RequiredNodeCapabilities;
 use crate::Chain;
 use crate::NodeCapabilities;
