@@ -72,7 +72,6 @@ impl blockchain::RuntimeAdapter<Chain> for RuntimeAdapter {
         let ethereum_call = HostFn {
             name: "ethereum.call",
             func: Arc::new(move |ctx, wasm_ptr| {
-                println!("block_number in host_fns: {:?}", ctx.block_ptr.number);
                 // Ethereum calls should prioritise call-only adapters if one is available.
                 let eth_adapter =
                     eth_adapters.call_or_cheapest(Some(&RequiredNodeCapabilities {

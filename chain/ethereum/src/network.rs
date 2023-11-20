@@ -132,22 +132,11 @@ impl EthereumNetworkAdapters {
             let block_number = Future::wait(adapter.adapter.block_number(&adapter.logger))?;
 
             let in_range = block_number - required_capabilities.block - 32 <= 0;
-            println!("in_range: {:?}", in_range);
-            println!(
-                "got block_number: {:?} we want {:?}",
-                block_number, required_capabilities
-            );
             if (adapter.capabilities.archive && required_capabilities.archive)
                 || (required_capabilities.archive && in_range)
             {
-                println!("returning adapter: {:?}", adapter);
                 return Ok(adapter.adapter.clone());
             }
-            println!(
-                "adapter: {:?} has capacity {:?}",
-                adapter,
-                adapter.get_capacity()
-            );
         }
 
         bail!(
@@ -316,10 +305,6 @@ impl EthereumNetworks {
                     .unwrap_or(Ordering::Equal)
             })
         }
-        println!(
-            "Sorted networks: {:?}",
-            self.networks.values().collect::<Vec<_>>()
-        );
     }
 
     pub fn adapter_with_capabilities(
