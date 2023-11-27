@@ -162,6 +162,7 @@ where
         instrument: bool,
     ) -> Result<BlockState<C>, MappingError> {
         let handler = trigger.handler_name().to_string();
+        let block_number = trigger.block_ptr().number;
 
         let extras = trigger.logging_extras();
         trace!(
@@ -205,6 +206,7 @@ where
 
         // If there is an error, "gas_used" is incorrectly reported as 0.
         let gas_used = result.as_ref().map(|(_, gas)| gas).unwrap_or(&Gas::ZERO);
+
         info!(
             logger, "Done processing trigger";
             &extras,
@@ -212,6 +214,7 @@ where
             "handler" => handler,
             "data_source" => &self.data_source.name(),
             "gas_used" => gas_used.to_string(),
+            "block_number" => block_number,
         );
 
         // Discard the gas value

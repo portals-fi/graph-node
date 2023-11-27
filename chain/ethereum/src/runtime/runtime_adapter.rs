@@ -1,10 +1,10 @@
 use std::{sync::Arc, time::Instant};
 
 use crate::data_source::MappingABI;
+use crate::network::RequiredNodeCapabilities;
 use crate::{
-    capabilities::NodeCapabilities, network::EthereumNetworkAdapters, Chain, DataSource,
-    EthereumAdapter, EthereumAdapterTrait, EthereumContractCall, EthereumContractCallError,
-    ENV_VARS,
+    network::EthereumNetworkAdapters, Chain, DataSource, EthereumAdapter, EthereumAdapterTrait,
+    EthereumContractCall, EthereumContractCallError, ENV_VARS,
 };
 use anyhow::{Context, Error};
 use blockchain::HostFn;
@@ -69,15 +69,16 @@ impl blockchain::RuntimeAdapter<Chain> for RuntimeAdapter {
         } else {
             Some(ETH_CALL_GAS)
         };
-
         let ethereum_call = HostFn {
             name: "ethereum.call",
             func: Arc::new(move |ctx, wasm_ptr| {
                 // Ethereum calls should prioritise call-only adapters if one is available.
-                let eth_adapter = eth_adapters.call_or_cheapest(Some(&NodeCapabilities {
-                    archive,
-                    traces: false,
-                }))?;
+                let eth_adapter =
+                    eth_adapters.call_or_cheapest(Some(&RequiredNodeCapabilities {
+                        archive,
+                        traces: false,
+                        block: ctx.block_ptr.number,
+                    }))?;
                 ethereum_call(
                     &eth_adapter,
                     call_cache.cheap_clone(),

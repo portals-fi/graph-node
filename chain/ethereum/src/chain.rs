@@ -40,7 +40,7 @@ use crate::codec::HeaderOnlyBlock;
 use crate::data_source::DataSourceTemplate;
 use crate::data_source::UnresolvedDataSourceTemplate;
 use crate::ingestor::PollingBlockIngestor;
-use crate::network::EthereumNetworkAdapters;
+use crate::network::{from_node_capabilities, EthereumNetworkAdapters};
 use crate::EthereumAdapter;
 use crate::NodeCapabilities;
 use crate::{
@@ -609,7 +609,9 @@ impl TriggersAdapterTrait<Chain> for TriggersAdapter {
         filter: &TriggerFilter,
     ) -> Result<Vec<BlockWithTriggers<Chain>>, Error> {
         blocks_with_triggers(
-            self.chain_client.rpc()?.cheapest_with(&self.capabilities)?,
+            self.chain_client
+                .rpc()?
+                .cheapest_with(&from_node_capabilities(&self.capabilities, -1))?,
             self.logger.clone(),
             self.chain_store.clone(),
             self.ethrpc_metrics.clone(),
@@ -639,8 +641,12 @@ impl TriggersAdapterTrait<Chain> for TriggersAdapter {
 
         match &block {
             BlockFinality::Final(_) => {
-                let adapter = self.chain_client.rpc()?.cheapest_with(&self.capabilities)?;
                 let block_number = block.number() as BlockNumber;
+                let adapter = self
+                    .chain_client
+                    .rpc()?
+                    .cheapest_with(&from_node_capabilities(&self.capabilities, -1))?;
+
                 let blocks = blocks_with_triggers(
                     adapter,
                     logger.clone(),
@@ -708,7 +714,7 @@ impl TriggersAdapterTrait<Chain> for TriggersAdapter {
             }),
             ChainClient::Rpc(adapters) => {
                 let blocks = adapters
-                    .cheapest_with(&self.capabilities)?
+                    .cheapest_with(&from_node_capabilities(&self.capabilities, -1))?
                     .load_blocks(
                         self.logger.cheap_clone(),
                         self.chain_store.cheap_clone(),

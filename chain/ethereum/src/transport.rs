@@ -25,6 +25,11 @@ impl Transport {
     /// Creates an IPC transport.
     #[cfg(unix)]
     pub async fn new_ipc(ipc: &str) -> Self {
+        let path = std::env::current_dir();
+        println!(
+            "The current directory is {}",
+            path.expect("Path not available").display()
+        );
         ipc::Ipc::new(ipc)
             .await
             .map(Transport::IPC)
